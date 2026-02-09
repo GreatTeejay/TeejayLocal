@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # teejay.sh
-# TEEJAY - GRE + Forwarder Manager (Local setup جدا از Tunnel/Forwarder)
+# TEEJAY - GRE + Forwarder Manager
+# UX: Local Setup جدا از Tunnel/Forwarder + Ping Test + Automation + Monitor + MTU presets
 
 set +e
 set +u
@@ -21,29 +22,33 @@ if command -v tput >/dev/null 2>&1; then
   C_YELLOW="$(tput setaf 3)"
   C_RED="$(tput setaf 1)"
   C_MAGENTA="$(tput setaf 5)"
+  C_BLUE="$(tput setaf 4)"
 else
   C_RESET=""; C_BOLD=""; C_DIM=""
-  C_CYAN=""; C_GREEN=""; C_YELLOW=""; C_RED=""; C_MAGENTA=""
+  C_CYAN=""; C_GREEN=""; C_YELLOW=""; C_RED=""; C_MAGENTA=""; C_BLUE=""
 fi
 
+# --- BIG LOGO (TEE JAY واضح) ---
 banner() {
-  cat <<EOF
-${C_CYAN}${C_BOLD}
-╔══════════════════════════════════════════════════════════════════════╗
-║                                                                      ║
-║     ████████╗███████╗███████╗     ██╗ █████╗ ██╗   ██╗               ║
-║     ╚══██╔══╝██╔════╝██╔════╝     ██║██╔══██╗╚██╗ ██╔╝               ║
-║        ██║   █████╗  █████╗       ██║███████║ ╚████╔╝                ║
-║        ██║   ██╔══╝  ██╔══╝       ██║██╔══██║  ╚██╔╝                 ║
-║        ██║   ███████╗███████╗     ██║██║  ██║   ██║                  ║
-║        ╚═╝   ╚══════╝╚══════╝     ╚═╝╚═╝  ╚═╝   ╚═╝                  ║
-║                                                                      ║
-║                         T E E J A Y                                  ║
-║                 Local Setup  |  Tunnel/Forwarder                     ║
-║                                                                      ║
-╚══════════════════════════════════════════════════════════════════════╝
-${C_RESET}
+  cat <<'EOF'
+████████╗███████╗███████╗      ██╗ █████╗ ██╗   ██╗
+╚══██╔══╝██╔════╝██╔════╝      ██║██╔══██╗╚██╗ ██╔╝
+   ██║   █████╗  █████╗        ██║███████║ ╚████╔╝
+   ██║   ██╔══╝  ██╔══╝   ██   ██║██╔══██║  ╚██╔╝
+   ██║   ███████╗███████╗ ╚█████╔╝██║  ██║   ██║
+   ╚═╝   ╚══════╝╚══════╝  ╚════╝ ╚═╝  ╚═╝   ╚═╝
+
+                     T E E   J A Y
 EOF
+}
+
+render_banner() {
+  clear
+  printf "%s" "${C_CYAN}${C_BOLD}"
+  banner
+  printf "%s\n" "${C_RESET}"
+  printf "%s%s%s\n" "${C_DIM}" "────────────────────────────────────────────────────────────────────────" "${C_RESET}"
+  printf "%s%s%s\n\n" "${C_BOLD}" "  Local Setup • Tunnel/Forwarder • Services • Tools" "${C_RESET}"
 }
 
 add_log() {
@@ -57,9 +62,8 @@ add_log() {
 }
 
 render() {
-  clear
-  banner
-  echo
+  render_banner
+
   local shown_count="${#LOG_LINES[@]}"
   local height=$shown_count
   ((height < LOG_MIN)) && height=$LOG_MIN
@@ -213,19 +217,20 @@ ask_ports() {
 
 # ----------------------------- Packages & IP detect ------------------------------
 ensure_packages() {
-  add_log "Checking required packages: iproute2, socat, curl"
+  add_log "Checking packages: iproute2, socat, curl, iputils-ping"
   render
   local missing=()
   command -v ip    >/dev/null 2>&1 || missing+=("iproute2")
   command -v socat >/dev/null 2>&1 || missing+=("socat")
   command -v curl  >/dev/null 2>&1 || missing+=("curl")
+  command -v ping  >/dev/null 2>&1 || missing+=("iputils-ping")
 
   if ((${#missing[@]}==0)); then
     add_log "All required packages are installed."
     return 0
   fi
 
-  add_log "Installing missing packages: ${missing[*]}"
+  add_log "Installing: ${missing[*]}"
   render
   apt-get update -y >/dev/null 2>&1
   apt-get install -y "${missing[@]}" >/dev/null 2>&1 && add_log "Packages installed successfully." || return 1
@@ -233,11 +238,12 @@ ensure_packages() {
 }
 
 ensure_local_prereqs() {
-  add_log "Checking required packages: iproute2, curl"
+  add_log "Checking packages: iproute2, curl, iputils-ping"
   render
   local missing=()
   command -v ip   >/dev/null 2>&1 || missing+=("iproute2")
   command -v curl >/dev/null 2>&1 || missing+=("curl")
+  command -v ping >/dev/null 2>&1 || missing+=("iputils-ping")
 
   if ((${#missing[@]}==0)); then
     add_log "Local prerequisites are installed."
@@ -279,7 +285,6 @@ ask_local_ip_smooth() {
   fi
 
   detected="$(detect_public_ipv4 || true)"
-
   if valid_ipv4 "$detected"; then
     add_log "Detected ${label} public IP: ${C_CYAN}${detected}${C_RESET}"
 
@@ -300,23 +305,15 @@ ask_local_ip_smooth() {
       choice="$(trim "$choice")"
 
       case "$choice" in
-        1)
-          printf -v "$__var" '%s' "$detected"
-          add_log "${C_GREEN}Using detected IP:${C_RESET} $detected"
-          return 0
-          ;;
+        1) printf -v "$__var" '%s' "$detected"; add_log "${C_GREEN}Using detected IP:${C_RESET} $detected"; return 0 ;;
         2)
           local manual=""
           ask_until_valid "${label} public IP (manual):" valid_ipv4 manual
           printf -v "$__var" '%s' "$manual"
           return 0
           ;;
-        0)
-          return 1
-          ;;
-        *)
-          add_log "Invalid selection."
-          ;;
+        0) return 1 ;;
+        *) add_log "Invalid selection." ;;
       esac
     done
   fi
@@ -328,7 +325,43 @@ ask_local_ip_smooth() {
   return 0
 }
 
-# ----------------------------- GRE helpers ------------------------------
+# ----------------------------- Config / Backup (after root) ------------------------------
+CFG_DIR=""
+BACKUP_DIR=""
+
+cfg_path() { local id="$1"; echo "${CFG_DIR}/gre${id}.conf"; }
+
+cfg_write_kv() {
+  local id="$1" k="$2" v="$3"
+  local f; f="$(cfg_path "$id")"
+  touch "$f" >/dev/null 2>&1 || true
+  if grep -qE "^${k}=" "$f" 2>/dev/null; then
+    sed -i -E "s|^${k}=.*|${k}=\"${v//\"/\\\"}\"|" "$f"
+  else
+    printf "%s=\"%s\"\n" "$k" "${v//\"/\\\"}" >> "$f"
+  fi
+}
+
+cfg_load() {
+  local id="$1"
+  local f; f="$(cfg_path "$id")"
+  [[ -f "$f" ]] || return 1
+  # shellcheck disable=SC1090
+  source "$f"
+  return 0
+}
+
+backup_unit_files() {
+  local id="$1"
+  local u="/etc/systemd/system/gre${id}.service"
+  [[ -f "$u" ]] && cp -a "$u" "${BACKUP_DIR}/gre${id}.service" >/dev/null 2>&1 || true
+  for fw in /etc/systemd/system/fw-gre${id}-*.service; do
+    [[ -f "$fw" ]] || continue
+    cp -a "$fw" "${BACKUP_DIR}/$(basename "$fw")" >/dev/null 2>&1 || true
+  done
+}
+
+# ----------------------------- GRE helpers / stability knobs ------------------------------
 valid_mtu() {
   local m="$1"
   [[ "$m" =~ ^[0-9]+$ ]] || return 1
@@ -343,24 +376,65 @@ show_unit_status_brief() {
   systemctl --no-pager --full status "$1" 2>&1 | sed -n '1,12p'
 }
 
+apply_net_tuning_common() {
+  sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
+  sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+  sysctl -w net.ipv4.tcp_keepalive_time=60 >/dev/null 2>&1 || true
+  sysctl -w net.ipv4.tcp_keepalive_intvl=10 >/dev/null 2>&1 || true
+  sysctl -w net.ipv4.tcp_keepalive_probes=6 >/dev/null 2>&1 || true
+}
+
 ensure_mtu_line_in_unit() {
   local id="$1" mtu="$2" file="$3"
   [[ -f "$file" ]] || return 0
 
-  if grep -qE "^ExecStart=/sbin/ip link set gre${id} mtu[[:space:]]+[0-9]+$" "$file"; then
-    sed -i.bak -E "s|^ExecStart=/sbin/ip link set gre${id} mtu[[:space:]]+[0-9]+$|ExecStart=/sbin/ip link set gre${id} mtu ${mtu}|" "$file"
+  if grep -qE "^ExecStart=/usr/bin/env ip link set gre${id} mtu[[:space:]]+[0-9]+$" "$file"; then
+    sed -i.bak -E "s|^ExecStart=/usr/bin/env ip link set gre${id} mtu[[:space:]]+[0-9]+$|ExecStart=/usr/bin/env ip link set gre${id} mtu ${mtu}|" "$file"
     add_log "Updated MTU line in: $file"
     return 0
   fi
 
-  if grep -qE "^ExecStart=/sbin/ip link set gre${id} up$" "$file"; then
-    sed -i.bak -E "s|^ExecStart=/sbin/ip link set gre${id} up$|ExecStart=/sbin/ip link set gre${id} mtu ${mtu}\nExecStart=/sbin/ip link set gre${id} up|" "$file"
+  if grep -qE "^ExecStart=/usr/bin/env ip link set gre${id} up$" "$file"; then
+    sed -i.bak -E "s|^ExecStart=/usr/bin/env ip link set gre${id} up$|ExecStart=/usr/bin/env ip link set gre${id} mtu ${mtu}\nExecStart=/usr/bin/env ip link set gre${id} up|" "$file"
     add_log "Inserted MTU line in: $file"
     return 0
   fi
 
-  printf "\nExecStart=/sbin/ip link set gre%s mtu %s\n" "$id" "$mtu" >> "$file"
+  printf "\nExecStart=/usr/bin/env ip link set gre%s mtu %s\n" "$id" "$mtu" >> "$file"
   add_log "WARNING: 'ip link set gre${id} up' not found; appended MTU line at end: $file"
+}
+
+pick_mtu_preset() {
+  # outputs MTU to stdout or empty for skip
+  local choice=""
+  while true; do
+    render
+    echo "${C_BOLD}MTU Setup${C_RESET}"
+    echo
+    echo "Choose an MTU preset (recommended if you have drops):"
+    echo "1) 1472  (often good)"
+    echo "2) 1460"
+    echo "3) 1420  (safe for many paths)"
+    echo "4) Custom (576-1600)"
+    echo "0) Skip (no MTU line)"
+    echo
+    read -r -p "Select: " choice
+    choice="$(trim "$choice")"
+    case "$choice" in
+      1) echo "1472"; return 0 ;;
+      2) echo "1460"; return 0 ;;
+      3) echo "1420"; return 0 ;;
+      4)
+        local m=""
+        ask_until_valid "Custom MTU (576-1600):" valid_mtu m
+        echo "$m"
+        return 0
+        ;;
+      0) echo ""; return 0 ;;
+      *) add_log "Invalid selection."; ;;
+    esac
+  done
 }
 
 make_gre_service() {
@@ -378,25 +452,29 @@ make_gre_service() {
 
   local mtu_line=""
   if [[ -n "$mtu" ]]; then
-    mtu_line="ExecStart=/sbin/ip link set gre${id} mtu ${mtu}"
+    mtu_line="ExecStart=/usr/bin/env ip link set gre${id} mtu ${mtu}"
   fi
 
   cat >"$path" <<EOF
 [Unit]
-Description=GRE Tunnel to (${remote_ip})
+Description=TEEJAY GRE Tunnel to (${remote_ip})
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c "/sbin/ip tunnel del gre${id} 2>/dev/null || true"
-ExecStart=/sbin/ip tunnel add gre${id} mode gre local ${local_ip} remote ${remote_ip} key ${key} nopmtudisc
-ExecStart=/sbin/ip addr add ${local_gre_ip}/30 dev gre${id}
+
+ExecStart=/bin/bash -c "/usr/bin/env ip tunnel del gre${id} 2>/dev/null || true"
+ExecStart=/usr/bin/env ip tunnel add gre${id} mode gre local ${local_ip} remote ${remote_ip} key ${key} nopmtudisc
+ExecStart=/usr/bin/env ip addr add ${local_gre_ip}/30 dev gre${id}
 ${mtu_line}
-ExecStart=/sbin/ip link set gre${id} up
-ExecStop=/sbin/ip link set gre${id} down
-ExecStop=/sbin/ip tunnel del gre${id}
+ExecStart=/usr/bin/env ip link set gre${id} up
+
+ExecStartPost=/bin/bash -c "/usr/bin/env sysctl -w net.ipv4.conf.gre${id}.rp_filter=0 >/dev/null 2>&1 || true"
+
+ExecStop=/usr/bin/env ip link set gre${id} down
+ExecStop=/usr/bin/env ip tunnel del gre${id}
 
 [Install]
 WantedBy=multi-user.target
@@ -421,14 +499,14 @@ make_fw_service() {
 
   cat >"$path" <<EOF
 [Unit]
-Description=forward gre${id} ${port}
+Description=TEEJAY forward gre${id} ${port}
 After=network-online.target gre${id}.service
 Wants=network-online.target
 
 [Service]
 ExecStart=/usr/bin/socat TCP4-LISTEN:${port},reuseaddr,fork TCP4:${target_ip}:${port}
 Restart=always
-RestartSec=2
+RestartSec=1
 
 [Install]
 WantedBy=multi-user.target
@@ -437,35 +515,93 @@ EOF
   [[ $? -eq 0 ]] && add_log "${C_GREEN}Forwarder created:${C_RESET} fw-gre${id}-${port}" || add_log "Failed writing forwarder: $unit"
 }
 
-apply_rpfilter_relax() {
-  sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
-  sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
+# ----------------------------- Monitor (reduce drops) ------------------------------
+# Ping peer GRE every 10s; if fail => restart gre + forwarders
+make_monitor_units() {
+  local id="$1"
+  local svc="/etc/systemd/system/teejay-mon-gre${id}.service"
+  local tmr="/etc/systemd/system/teejay-mon-gre${id}.timer"
+
+  if unit_exists "teejay-mon-gre${id}.service"; then
+    add_log "Monitor already exists for GRE${id}"
+    return 0
+  fi
+
+  add_log "Creating monitor for GRE${id} (10s interval)"
+  render
+
+  cat >"$svc" <<EOF
+[Unit]
+Description=TEEJAY Monitor GRE${id}
+After=network-online.target gre${id}.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '
+set -e
+CFG="${CFG_DIR}/gre${id}.conf"
+[[ -f "\$CFG" ]] || exit 0
+source "\$CFG"
+T="\${PEER_GRE_IP:-}"
+[[ -n "\$T" ]] || exit 0
+
+if ping -n -c 1 -W 1 "\$T" >/dev/null 2>&1; then
+  exit 0
+fi
+
+systemctl restart "gre${id}.service" >/dev/null 2>&1 || true
+for fw in /etc/systemd/system/fw-gre${id}-*.service; do
+  [[ -f "\$fw" ]] || continue
+  systemctl restart "\$(basename "\$fw")" >/dev/null 2>&1 || true
+done
+'
+EOF
+
+  cat >"$tmr" <<EOF
+[Unit]
+Description=TEEJAY Monitor Timer GRE${id}
+
+[Timer]
+OnBootSec=15
+OnUnitActiveSec=10
+AccuracySec=1
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemd_reload
+  add_log "${C_GREEN}Monitor created:${C_RESET} teejay-mon-gre${id}.timer"
+  return 0
+}
+
+enable_monitor() {
+  local id="$1"
+  make_monitor_units "$id" || return 1
+  systemctl enable --now "teejay-mon-gre${id}.timer" >/dev/null 2>&1 || true
+  add_log "Monitor enabled for GRE${id}"
+}
+
+disable_monitor() {
+  local id="$1"
+  systemctl disable --now "teejay-mon-gre${id}.timer" >/dev/null 2>&1 || true
+  add_log "Monitor disabled for GRE${id}"
 }
 
 # ----------------------------- Local Setup (GRE only) ------------------------------
 iran_local_setup() {
-  local ID IRANIP KHAREJIP GREBASE
-  local use_mtu="n" MTU_VALUE=""
-
+  local ID IRANIP KHAREJIP GREBASE MTU_VALUE=""
   add_log "${C_MAGENTA}Wizard:${C_RESET} IRAN Local Setup (GRE only)"
-  ask_until_valid "GRE Number:" is_int ID
 
-  ensure_local_prereqs || { die_soft "Package installation failed (iproute2/curl)."; return 0; }
+  ask_until_valid "GRE Number:" is_int ID
+  ensure_local_prereqs || { die_soft "Package installation failed."; return 0; }
 
   ask_local_ip_smooth "IRAN" IRANIP || { add_log "Cancelled."; return 0; }
-  ask_until_valid "KHAREJ IP (remote):" valid_ipv4 KHAREJIP
-  ask_until_valid "GRE IP RANGE base (example: 10.80.70.0):" valid_gre_base GREBASE
+  ask_until_valid "KHAREJ public IP (remote):" valid_ipv4 KHAREJIP
+  ask_until_valid "GRE IP RANGE base (example: 10.90.90.0):" valid_gre_base GREBASE
 
-  while true; do
-    render
-    read -r -p "Set custom MTU? (y/n): " use_mtu
-    use_mtu="$(trim "$use_mtu")"
-    case "${use_mtu,,}" in
-      y|yes) ask_until_valid "Custom MTU (576-1600):" valid_mtu MTU_VALUE; break ;;
-      n|no|"") MTU_VALUE=""; break ;;
-      *) add_log "Invalid input. Please enter y or n." ;;
-    esac
-  done
+  MTU_VALUE="$(pick_mtu_preset)"
 
   local key=$((ID*100))
   local local_gre_ip peer_gre_ip
@@ -478,48 +614,52 @@ iran_local_setup() {
   [[ $rc -eq 2 ]] && { die_soft "gre${ID}.service already exists."; return 0; }
   [[ $rc -ne 0 ]] && { die_soft "Failed creating GRE service."; return 0; }
 
+  cfg_write_kv "$ID" "SIDE" "IRAN"
+  cfg_write_kv "$ID" "LOCAL_PUBLIC_IP" "$IRANIP"
+  cfg_write_kv "$ID" "REMOTE_PUBLIC_IP" "$KHAREJIP"
+  cfg_write_kv "$ID" "GRE_BASE" "$GREBASE"
+  cfg_write_kv "$ID" "LOCAL_GRE_IP" "$local_gre_ip"
+  cfg_write_kv "$ID" "PEER_GRE_IP" "$peer_gre_ip"
+  cfg_write_kv "$ID" "KEY" "$key"
+  cfg_write_kv "$ID" "MTU" "$MTU_VALUE"
+
   add_log "Reloading systemd..."
   systemd_reload
-
   add_log "Starting gre${ID}.service ..."
   enable_now "gre${ID}.service"
-  apply_rpfilter_relax
+
+  apply_net_tuning_common
+  backup_unit_files "$ID"
 
   render
-  echo "${C_BOLD}GRE IPs:${C_RESET}"
-  echo "  IRAN  : ${local_gre_ip}"
-  echo "  KHAREJ: ${peer_gre_ip}"
+  echo "${C_BOLD}Summary:${C_RESET}"
+  echo "  GRE ID         : ${ID}"
+  echo "  Side           : IRAN"
+  echo "  Local Public   : ${IRANIP}"
+  echo "  Remote Public  : ${KHAREJIP}"
+  echo "  Local GRE IP   : ${local_gre_ip}"
+  echo "  Peer  GRE IP   : ${peer_gre_ip}"
+  echo "  MTU            : ${MTU_VALUE:-default}"
   echo
   echo "${C_BOLD}Status:${C_RESET}"
   show_unit_status_brief "gre${ID}.service"
   echo
-  echo "${C_DIM}Forwarders are separate. Use Tunnel/Forwarder menu later.${C_RESET}"
+  echo "${C_DIM}Next: use Tunnel/Forwarder menu to add ports.${C_RESET}"
   pause_enter
 }
 
 kharej_local_setup() {
-  local ID KHAREJIP IRANIP GREBASE
-  local use_mtu="n" MTU_VALUE=""
-
+  local ID KHAREJIP IRANIP GREBASE MTU_VALUE=""
   add_log "${C_MAGENTA}Wizard:${C_RESET} KHAREJ Local Setup (GRE only)"
-  ask_until_valid "GRE Number (same as IRAN):" is_int ID
 
-  ensure_local_prereqs || { die_soft "Package installation failed (iproute2/curl)."; return 0; }
+  ask_until_valid "GRE Number (same as IRAN):" is_int ID
+  ensure_local_prereqs || { die_soft "Package installation failed."; return 0; }
 
   ask_local_ip_smooth "KHAREJ" KHAREJIP || { add_log "Cancelled."; return 0; }
-  ask_until_valid "IRAN IP (remote):" valid_ipv4 IRANIP
-  ask_until_valid "GRE IP RANGE base (example: 10.80.70.0):" valid_gre_base GREBASE
+  ask_until_valid "IRAN public IP (remote):" valid_ipv4 IRANIP
+  ask_until_valid "GRE IP RANGE base (example: 10.90.90.0):" valid_gre_base GREBASE
 
-  while true; do
-    render
-    read -r -p "Set custom MTU? (y/n): " use_mtu
-    use_mtu="$(trim "$use_mtu")"
-    case "${use_mtu,,}" in
-      y|yes) ask_until_valid "Custom MTU (576-1600):" valid_mtu MTU_VALUE; break ;;
-      n|no|"") MTU_VALUE=""; break ;;
-      *) add_log "Invalid input. Please enter y or n." ;;
-    esac
-  done
+  MTU_VALUE="$(pick_mtu_preset)"
 
   local key=$((ID*100))
   local local_gre_ip peer_gre_ip
@@ -532,27 +672,41 @@ kharej_local_setup() {
   [[ $rc -eq 2 ]] && { die_soft "gre${ID}.service already exists."; return 0; }
   [[ $rc -ne 0 ]] && { die_soft "Failed creating GRE service."; return 0; }
 
+  cfg_write_kv "$ID" "SIDE" "KHAREJ"
+  cfg_write_kv "$ID" "LOCAL_PUBLIC_IP" "$KHAREJIP"
+  cfg_write_kv "$ID" "REMOTE_PUBLIC_IP" "$IRANIP"
+  cfg_write_kv "$ID" "GRE_BASE" "$GREBASE"
+  cfg_write_kv "$ID" "LOCAL_GRE_IP" "$local_gre_ip"
+  cfg_write_kv "$ID" "PEER_GRE_IP" "$peer_gre_ip"
+  cfg_write_kv "$ID" "KEY" "$key"
+  cfg_write_kv "$ID" "MTU" "$MTU_VALUE"
+
   add_log "Reloading systemd..."
   systemd_reload
-
   add_log "Starting gre${ID}.service ..."
   enable_now "gre${ID}.service"
-  apply_rpfilter_relax
+
+  apply_net_tuning_common
+  backup_unit_files "$ID"
 
   render
-  echo "${C_BOLD}GRE IPs:${C_RESET}"
-  echo "  KHAREJ: ${local_gre_ip}"
-  echo "  IRAN  : ${peer_gre_ip}"
+  echo "${C_BOLD}Summary:${C_RESET}"
+  echo "  GRE ID         : ${ID}"
+  echo "  Side           : KHAREJ"
+  echo "  Local Public   : ${KHAREJIP}"
+  echo "  Remote Public  : ${IRANIP}"
+  echo "  Local GRE IP   : ${local_gre_ip}"
+  echo "  Peer  GRE IP   : ${peer_gre_ip}"
+  echo "  MTU            : ${MTU_VALUE:-default}"
   echo
   echo "${C_BOLD}Status:${C_RESET}"
   show_unit_status_brief "gre${ID}.service"
   pause_enter
 }
 
-# ----------------------------- Tunnel / Forwarder (separate) ------------------------------
+# ----------------------------- Tunnel / Forwarder ------------------------------
 get_gre_ids() {
   local ids=()
-
   while IFS= read -r u; do
     [[ "$u" =~ ^gre([0-9]+)\.service$ ]] && ids+=("${BASH_REMATCH[1]}")
   done < <(systemctl list-unit-files --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^gre[0-9]+\.service$' || true)
@@ -652,7 +806,7 @@ tunnel_forwarder_add_ports() {
   local -a PORT_LIST=()
   local id cidr target_ip
 
-  ensure_packages || { die_soft "Package installation failed (iproute2/socat/curl)."; return 0; }
+  ensure_packages || { die_soft "Package installation failed."; return 0; }
 
   mapfile -t GRE_IDS < <(get_gre_ids)
   local -a GRE_LABELS=()
@@ -692,6 +846,8 @@ tunnel_forwarder_add_ports() {
     make_fw_service "$id" "$p" "$target_ip"
   done
 
+  cfg_write_kv "$id" "PORTS" "${PORT_LIST[*]}"
+
   add_log "Reloading systemd..."
   systemd_reload
 
@@ -700,16 +856,152 @@ tunnel_forwarder_add_ports() {
     enable_now "fw-gre${id}-${p}.service"
   done
 
+  backup_unit_files "$id"
+
   render
-  echo "${C_BOLD}GRE${id}:${C_RESET}"
-  echo "  inet   : ${cidr}"
-  echo "  target : ${target_ip}"
+  echo "${C_BOLD}Forwarder Summary:${C_RESET}"
+  echo "  GRE ID   : ${id}"
+  echo "  Target   : ${target_ip}"
+  echo "  Ports    : ${PORT_LIST[*]}"
   echo
-  echo "${C_BOLD}Forwarder status:${C_RESET}"
+  echo "${C_BOLD}Status:${C_RESET}"
   for p in "${PORT_LIST[@]}"; do
     echo
     show_unit_status_brief "fw-gre${id}-${p}.service"
   done
+  pause_enter
+}
+
+# ----------------------------- Tools: Ping Test (10s) ------------------------------
+ping_test_10s() {
+  mapfile -t GRE_IDS < <(get_gre_ids)
+  local -a GRE_LABELS=()
+  local id
+  for id in "${GRE_IDS[@]}"; do GRE_LABELS+=("GRE${id}"); done
+
+  if ! menu_select_index "Ping Test (10 seconds)" "Select GRE:" "${GRE_LABELS[@]}"; then
+    return 0
+  fi
+  id="${GRE_IDS[$MENU_SELECTED]}"
+
+  if ! cfg_load "$id"; then
+    die_soft "Config not found for GRE${id} (${CFG_DIR}/gre${id}.conf). Run Local Setup first."
+    return 0
+  fi
+
+  local target="${PEER_GRE_IP:-}"
+  if ! valid_ipv4 "$target"; then
+    die_soft "PEER_GRE_IP is missing/invalid in config for GRE${id}."
+    return 0
+  fi
+
+  add_log "Ping target for GRE${id}: ${C_CYAN}${target}${C_RESET}"
+  render
+  echo "${C_BOLD}Pinging for 10 seconds...${C_RESET}"
+  echo "GRE${id} SIDE=${SIDE:-unknown}  ->  PEER_GRE_IP=${target}"
+  echo
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 10 ping -n "$target"
+    local rc=$?
+    echo
+    [[ $rc -eq 0 ]] && echo "${C_GREEN}Ping OK${C_RESET}" || echo "${C_RED}Ping FAILED (rc=$rc)${C_RESET}"
+  else
+    ping -n -c 10 -i 1 "$target"
+    local rc=$?
+    echo
+    [[ $rc -eq 0 ]] && echo "${C_GREEN}Ping OK${C_RESET}" || echo "${C_RED}Ping FAILED (rc=$rc)${C_RESET}"
+  fi
+
+  pause_enter
+}
+
+# ----------------------------- Automation ------------------------------
+automation_fast_rebuild() {
+  mapfile -t GRE_IDS < <(get_gre_ids)
+  local -a GRE_LABELS=()
+  local id
+  for id in "${GRE_IDS[@]}"; do GRE_LABELS+=("GRE${id}"); done
+
+  if ! menu_select_index "Automation: Fast Rebuild" "Select GRE:" "${GRE_LABELS[@]}"; then
+    return 0
+  fi
+  id="${GRE_IDS[$MENU_SELECTED]}"
+
+  add_log "Fast rebuild for GRE${id}..."
+  render
+
+  for fw in /etc/systemd/system/fw-gre${id}-*.service; do
+    [[ -f "$fw" ]] || continue
+    systemctl stop "$(basename "$fw")" >/dev/null 2>&1 || true
+  done
+
+  systemctl restart "gre${id}.service" >/dev/null 2>&1 || true
+
+  for fw in /etc/systemd/system/fw-gre${id}-*.service; do
+    [[ -f "$fw" ]] || continue
+    systemctl restart "$(basename "$fw")" >/dev/null 2>&1 || true
+  done
+
+  apply_net_tuning_common
+
+  add_log "${C_GREEN}Fast rebuild done.${C_RESET}"
+  render
+  show_unit_status_brief "gre${id}.service"
+  pause_enter
+}
+
+automation_restore_from_backup() {
+  mapfile -t GRE_IDS < <(get_gre_ids)
+  local -a GRE_LABELS=()
+  local id
+  for id in "${GRE_IDS[@]}"; do GRE_LABELS+=("GRE${id}"); done
+
+  if ! menu_select_index "Automation: Restore From Backup" "Select GRE:" "${GRE_LABELS[@]}"; then
+    return 0
+  fi
+  id="${GRE_IDS[$MENU_SELECTED]}"
+
+  local bak_gre="${BACKUP_DIR}/gre${id}.service"
+  if [[ ! -f "$bak_gre" ]]; then
+    die_soft "Backup not found: $bak_gre"
+    return 0
+  fi
+
+  add_log "Restoring GRE${id} from backups..."
+  render
+
+  systemctl stop "gre${id}.service" >/dev/null 2>&1 || true
+  systemctl disable "gre${id}.service" >/dev/null 2>&1 || true
+
+  for fw in /etc/systemd/system/fw-gre${id}-*.service; do
+    [[ -f "$fw" ]] || continue
+    systemctl stop "$(basename "$fw")" >/dev/null 2>&1 || true
+    systemctl disable "$(basename "$fw")" >/dev/null 2>&1 || true
+  done
+
+  rm -f "/etc/systemd/system/gre${id}.service" >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/fw-gre${id}-*.service >/dev/null 2>&1 || true
+
+  cp -a "$bak_gre" "/etc/systemd/system/gre${id}.service" >/dev/null 2>&1 || true
+  for fw_bak in "${BACKUP_DIR}"/fw-gre${id}-*.service; do
+    [[ -f "$fw_bak" ]] || continue
+    cp -a "$fw_bak" "/etc/systemd/system/$(basename "$fw_bak")" >/dev/null 2>&1 || true
+  done
+
+  systemd_reload
+
+  systemctl enable --now "gre${id}.service" >/dev/null 2>&1 || true
+  for fw in /etc/systemd/system/fw-gre${id}-*.service; do
+    [[ -f "$fw" ]] || continue
+    systemctl enable --now "$(basename "$fw")" >/dev/null 2>&1 || true
+  done
+
+  apply_net_tuning_common
+
+  add_log "${C_GREEN}Restore completed.${C_RESET}"
+  render
+  show_unit_status_brief "gre${id}.service"
   pause_enter
 }
 
@@ -750,7 +1042,7 @@ service_action_menu() {
       4)
         render
         echo "---- STATUS ($unit) ----"
-        systemctl --no-pager --full status "$unit" 2>&1 | sed -n '1,16p'
+        systemctl --no-pager --full status "$unit" 2>&1 | sed -n '1,20p'
         echo "------------------------"
         pause_enter
         ;;
@@ -769,6 +1061,7 @@ services_management() {
     echo
     echo "1) GRE services"
     echo "2) Forwarder services"
+    echo "3) Monitor timers"
     echo "0) Back"
     echo
     read -r -e -p "Select: " sel
@@ -782,8 +1075,7 @@ services_management() {
         for id in "${GRE_IDS[@]}"; do GRE_LABELS+=("GRE${id}"); done
 
         if menu_select_index "GRE Services" "Select GRE:" "${GRE_LABELS[@]}"; then
-          local idx="$MENU_SELECTED"
-          id="${GRE_IDS[$idx]}"
+          id="${GRE_IDS[$MENU_SELECTED]}"
           add_log "GRE selected: GRE${id}"
           service_action_menu "gre${id}.service"
         fi
@@ -805,10 +1097,39 @@ services_management() {
         done
 
         if menu_select_index "Forwarder Services" "Select Forwarder:" "${FW_LABELS[@]}"; then
-          local fidx="$MENU_SELECTED"
-          u="${FW_UNITS[$fidx]}"
-          add_log "Forwarder selected: ${FW_LABELS[$fidx]}"
+          u="${FW_UNITS[$MENU_SELECTED]}"
+          add_log "Forwarder selected."
           service_action_menu "$u"
+        fi
+        ;;
+
+      3)
+        mapfile -t GRE_IDS < <(get_gre_ids)
+        local -a GRE_LABELS=()
+        local id
+        for id in "${GRE_IDS[@]}"; do GRE_LABELS+=("GRE${id}"); done
+        if menu_select_index "Monitor Timers" "Select GRE:" "${GRE_LABELS[@]}"; then
+          id="${GRE_IDS[$MENU_SELECTED]}"
+          while true; do
+            render
+            echo "${C_BOLD}Monitor for GRE${id}${C_RESET}"
+            echo
+            echo "1) Enable monitor (ping peer every 10s, auto-restart)"
+            echo "2) Disable monitor"
+            echo "3) Status"
+            echo "0) Back"
+            echo
+            local a=""
+            read -r -p "Select: " a
+            a="$(trim "$a")"
+            case "$a" in
+              1) enable_monitor "$id" ;;
+              2) disable_monitor "$id" ;;
+              3) render; systemctl --no-pager --full status "teejay-mon-gre${id}.timer" 2>&1 | sed -n '1,20p'; pause_enter ;;
+              0) break ;;
+              *) add_log "Invalid option." ;;
+            esac
+          done
         fi
         ;;
 
@@ -819,50 +1140,6 @@ services_management() {
 }
 
 # ----------------------------- Uninstall & Clean ------------------------------
-automation_backup_dir() { echo "/root/gre-backup"; }
-automation_script_path() { local id="$1"; echo "/usr/local/bin/sepehr-recreate-gre${id}.sh"; }
-automation_log_path() { local id="$1"; echo "/var/log/sepehr-gre${id}.log"; }
-
-remove_gre_automation_cron() {
-  local id="$1"
-  local script
-  script="$(automation_script_path "$id")"
-
-  crontab -l >/dev/null 2>&1 || return 0
-  local tmp
-  tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -vF "$script" > "$tmp" || true
-  crontab "$tmp" 2>/dev/null || true
-  rm -f "$tmp" >/dev/null 2>&1 || true
-}
-
-remove_gre_automation_backups() {
-  local id="$1"
-  local bakdir
-  bakdir="$(automation_backup_dir)"
-
-  [[ -d "$bakdir" ]] || { add_log "Backup dir not found: $bakdir"; return 0; }
-
-  local removed_any=0
-
-  if [[ -f "$bakdir/gre${id}.service" ]]; then
-    rm -f "$bakdir/gre${id}.service" >/dev/null 2>&1 || true
-    add_log "Removed backup: $bakdir/gre${id}.service"
-    removed_any=1
-  fi
-
-  local fw
-  shopt -s nullglob
-  for fw in "$bakdir"/fw-gre${id}-*.service; do
-    rm -f "$fw" >/dev/null 2>&1 || true
-    add_log "Removed backup: $fw"
-    removed_any=1
-  done
-  shopt -u nullglob
-
-  [[ $removed_any -eq 0 ]] && add_log "No backup files found for GRE${id}."
-}
-
 uninstall_clean() {
   mapfile -t GRE_IDS < <(get_gre_ids)
   local -a GRE_LABELS=()
@@ -873,8 +1150,7 @@ uninstall_clean() {
     return 0
   fi
 
-  local idx="$MENU_SELECTED"
-  id="${GRE_IDS[$idx]}"
+  id="${GRE_IDS[$MENU_SELECTED]}"
 
   while true; do
     render
@@ -902,34 +1178,25 @@ uninstall_clean() {
   systemctl stop "gre${id}.service" >/dev/null 2>&1 || true
   systemctl disable "gre${id}.service" >/dev/null 2>&1 || true
 
-  mapfile -t FW_UNITS < <(get_fw_units_for_id "$id")
-  if ((${#FW_UNITS[@]} > 0)); then
-    local u
-    for u in "${FW_UNITS[@]}"; do
-      add_log "Stopping/Disabling $u"
-      systemctl stop "$u" >/dev/null 2>&1 || true
-      systemctl disable "$u" >/dev/null 2>&1 || true
-    done
-  else
-    add_log "No forwarders found for GRE${id}"
-  fi
+  for fw in /etc/systemd/system/fw-gre${id}-*.service; do
+    [[ -f "$fw" ]] || continue
+    systemctl stop "$(basename "$fw")" >/dev/null 2>&1 || true
+    systemctl disable "$(basename "$fw")" >/dev/null 2>&1 || true
+  done
+
+  systemctl disable --now "teejay-mon-gre${id}.timer" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/teejay-mon-gre${id}.service" "/etc/systemd/system/teejay-mon-gre${id}.timer" >/dev/null 2>&1 || true
 
   add_log "Removing unit files..."
   rm -f "/etc/systemd/system/gre${id}.service" >/dev/null 2>&1 || true
   rm -f /etc/systemd/system/fw-gre${id}-*.service >/dev/null 2>&1 || true
 
+  add_log "Removing config..."
+  rm -f "$(cfg_path "$id")" >/dev/null 2>&1 || true
+
   add_log "Reloading systemd..."
   systemctl daemon-reload >/dev/null 2>&1 || true
   systemctl reset-failed  >/dev/null 2>&1 || true
-
-  add_log "Removing automation (cron/script/log/backup)..."
-  remove_gre_automation_cron "$id"
-  local a_script a_log
-  a_script="$(automation_script_path "$id")"
-  a_log="$(automation_log_path "$id")"
-  [[ -f "$a_script" ]] && rm -f "$a_script" >/dev/null 2>&1 || true
-  [[ -f "$a_log" ]] && rm -f "$a_log" >/dev/null 2>&1 || true
-  remove_gre_automation_backups "$id"
 
   add_log "${C_GREEN}Uninstall completed for GRE${id}${C_RESET}"
   render
@@ -939,7 +1206,6 @@ uninstall_clean() {
 # ----------------------------- MTU change ------------------------------
 change_mtu() {
   local id mtu
-
   mapfile -t GRE_IDS < <(get_gre_ids)
   local -a GRE_LABELS=()
   for id in "${GRE_IDS[@]}"; do GRE_LABELS+=("GRE${id}"); done
@@ -953,10 +1219,10 @@ change_mtu() {
 
   add_log "Setting MTU on interface gre${id} to ${mtu}..."
   render
-  ip link set "gre${id}" mtu "$mtu" >/dev/null 2>&1 || add_log "WARNING: gre${id} interface not found/up (will still patch unit)."
+  ip link set "gre${id}" mtu "$mtu" >/dev/null 2>&1 || add_log "WARNING: gre${id} interface not found/up (unit will be patched)."
 
   local unit="/etc/systemd/system/gre${id}.service"
-  local backup="/root/gre-backup/gre${id}.service"
+  local backup="${BACKUP_DIR}/gre${id}.service"
 
   add_log "Patching unit file: $unit"
   render
@@ -971,9 +1237,9 @@ change_mtu() {
     add_log "Patching backup unit: $backup"
     render
     ensure_mtu_line_in_unit "$id" "$mtu" "$backup"
-  else
-    add_log "No backup unit found (skip): $backup"
   fi
+
+  cfg_write_kv "$id" "MTU" "$mtu"
 
   add_log "Reloading systemd..."
   systemd_reload
@@ -986,7 +1252,7 @@ change_mtu() {
   pause_enter
 }
 
-# ----------------------------- Menus (smooth separation) ------------------------------
+# ----------------------------- Menus ------------------------------
 local_setup_menu() {
   local choice=""
   while true; do
@@ -999,7 +1265,6 @@ local_setup_menu() {
     echo
     read -r -e -p "Select option: " choice
     choice="$(trim "$choice")"
-
     case "$choice" in
       1) add_log "Selected: IRAN local setup"; iran_local_setup ;;
       2) add_log "Selected: KHAREJ local setup"; kharej_local_setup ;;
@@ -1020,9 +1285,31 @@ tunnel_menu() {
     echo
     read -r -e -p "Select option: " choice
     choice="$(trim "$choice")"
-
     case "$choice" in
       1) add_log "Selected: Add forwarder ports"; tunnel_forwarder_add_ports ;;
+      0) return 0 ;;
+      *) add_log "Invalid option: $choice" ;;
+    esac
+  done
+}
+
+tools_menu() {
+  local choice=""
+  while true; do
+    render
+    echo "${C_BOLD}Tools${C_RESET}"
+    echo
+    echo "1) Ping test (10 seconds) to peer GRE IP"
+    echo "2) Automation: Fast rebuild (restart GRE + forwarders)"
+    echo "3) Automation: Restore from backup (reinstall saved units)"
+    echo "0) Back"
+    echo
+    read -r -e -p "Select option: " choice
+    choice="$(trim "$choice")"
+    case "$choice" in
+      1) ping_test_10s ;;
+      2) automation_fast_rebuild ;;
+      3) automation_restore_from_backup ;;
       0) return 0 ;;
       *) add_log "Invalid option: $choice" ;;
     esac
@@ -1037,26 +1324,34 @@ main_menu() {
     echo
     echo "1) Local Setup (IRAN / KHAREJ)  [GRE only]"
     echo "2) Tunnel / Forwarder           [ports later]"
-    echo "3) Services Management"
-    echo "4) Uninstall & Clean"
-    echo "5) Change MTU"
+    echo "3) Services Management          [GRE/FW/Monitor]"
+    echo "4) Tools                        [Ping/Automation]"
+    echo "5) Uninstall & Clean"
+    echo "6) Change MTU"
     echo "0) Exit"
     echo
     read -r -e -p "Select option: " choice
     choice="$(trim "$choice")"
-
     case "$choice" in
       1) add_log "Open: Local Setup"; local_setup_menu ;;
       2) add_log "Open: Tunnel/Forwarder"; tunnel_menu ;;
       3) add_log "Open: Services Management"; services_management ;;
-      4) add_log "Selected: Uninstall & Clean"; uninstall_clean ;;
-      5) add_log "Selected: Change MTU"; change_mtu ;;
+      4) add_log "Open: Tools"; tools_menu ;;
+      5) add_log "Selected: Uninstall & Clean"; uninstall_clean ;;
+      6) add_log "Selected: Change MTU"; change_mtu ;;
       0) add_log "Bye!"; render; exit 0 ;;
       *) add_log "Invalid option: $choice" ;;
     esac
   done
 }
 
+# ----------------------------- Boot ------------------------------
 ensure_root "$@"
-add_log "TEEjAY started. GRE/Forwarder manager loaded."
+
+# init dirs AFTER root (fix)
+CFG_DIR="/etc/teejay"
+BACKUP_DIR="/root/teejay-backup"
+mkdir -p "$CFG_DIR" "$BACKUP_DIR" >/dev/null 2>&1 || true
+
+add_log "TEEJAY started. GRE/Forwarder manager loaded."
 main_menu
