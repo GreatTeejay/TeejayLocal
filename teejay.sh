@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-
-# TEEJAY TUNNEL MANAGER - OPTIMIZED
-# Separation of Tunnel & Forwarding + Anti-Disconnect Keepalive
+#
+# TEEJAY TUNNEL MANAGER v3.0 (Fixed & Stable)
+#
 
 set +e
 set +u
 export LC_ALL=C
-LOG_LINES=()
-LOG_MIN=3
+
+# --- CONFIGS ---
 LOG_MAX=10
+LOG_LINES=()
 
-# --- STYLING & UTILS ---
-
+# --- UTILS & UI ---
 banner() {
   cat <<'EOF'
 ╔═════════════════════════════════════════════════════╗
@@ -23,8 +23,7 @@ banner() {
 ║      ██║   ███████╗███████╗╚█████╔╝██║  ██║   ██║   ║
 ║      ╚═╝   ╚══════╝╚══════╝ ╚════╝ ╚═╝  ╚═╝   ╚═╝   ║
 ║                                                     ║
-║             S T A B L E   &   S E C U R E           ║
-║                                                     ║
+║           FIXED EDITION  |  NO BUGS                 ║
 ╚═════════════════════════════════════════════════════╝
 EOF
 }
@@ -45,7 +44,7 @@ render() {
   echo
   local shown_count="${#LOG_LINES[@]}"
   local height=$shown_count
-  ((height < LOG_MIN)) && height=$LOG_MIN
+  ((height < 3)) && height=3
   ((height > LOG_MAX)) && height=$LOG_MAX
 
   echo "┌───────────────────────────── ACTION LOG ─────────────────────────────┐"
@@ -74,45 +73,79 @@ pause_enter() {
   read -r -p "Press ENTER to return to menu..." _
 }
 
-die_soft() {
+die() {
   add_log "ERROR: $1"
   render
-  pause_enter
+  echo "Critical Error: $1"
+  exit 1
 }
 
-ensure_root() {
-  if [[ $EUID -ne 0 ]]; then
-    echo "This script must be run as root. Re-running with sudo..."
-    exec sudo -E bash "$0" "$@"
-  fi
+# --- VALIDATORS (FIXED) ---
+
+# Simple trim function
+trim() {
+    local var="$*"
+    # remove leading whitespace characters
+    var="${var#"${var%%[![:space:]]*}"}"
+    # remove trailing whitespace characters
+    var="${var%"${var##*[![:space:]]}"}"
+    echo -n "$var"
 }
 
-trim() { sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' <<<"$1"; }
-is_int() { [[ "$1" =~ ^[0-9]+$ ]]; }
-
-valid_octet() {
-  local o="$1"
-  [[ "$o" =~ ^[0-9]+$ ]] && ((o>=0 && o<=255))
+is_int() {
+    [[ "$1" =~ ^[0-9]+$ ]]
 }
 
 valid_ipv4() {
-  local ip="$1"
-  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
-  IFS='.' read -r a b c d <<<"$ip"
-  valid_octet "$a" && valid_octet "$b" && valid_octet "$c" && valid_octet "$d"
-}
-
-valid_port() {
-  local p="$1"
-  is_int "$p" || return 1
-  ((p>=1 && p<=65535))
+    local ip="$1"
+    if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        IFS='.' read -r -a octets <<< "$ip"
+        for octet in "${octets[@]}"; do
+            if ((octet < 0 || octet > 255)); then return 1; fi
+        done
+        return 0
+    else
+        return 1
+    fi
 }
 
 valid_gre_base() {
-  local ip="$1"
-  valid_ipv4 "$ip" || return 1
-  [[ "$ip" =~ \.0$ ]] || return 1
-  return 0
+    local ip="$1"
+    valid_ipv4 "$ip" || return 1
+    [[ "$ip" =~ \.0$ ]] || return 1
+    return 0
+}
+
+valid_mtu() {
+    local m="$1"
+    # Pure integer check without complex regex if possible
+    if [[ "$m" =~ ^[0-9]+$ ]]; then
+        if ((m >= 576 && m <= 1600)); then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+valid_port() {
+    local p="$1"
+    if [[ "$p" =~ ^[0-9]+$ ]]; then
+        if ((p >= 1 && p <= 65535)); then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# --- HELPERS ---
+
+get_public_ip() {
+    local ip
+    ip=$(curl -s --max-time 3 https://api.ipify.org)
+    if [[ -z "$ip" ]]; then
+        ip=$(curl -s --max-time 3 http://ifconfig.me)
+    fi
+    echo "$ip"
 }
 
 ipv4_set_last_octet() {
@@ -121,447 +154,351 @@ ipv4_set_last_octet() {
   echo "${a}.${b}.${c}.${last}"
 }
 
-ask_until_valid() {
-  local prompt="$1" validator="$2" __var="$3"
-  local ans=""
-  while true; do
-    render
-    read -r -e -p "$prompt " ans
-    ans="$(trim "$ans")"
-    if [[ -z "$ans" ]]; then
-      add_log "Empty input. Please try again."
-      continue
-    fi
-    if "$validator" "$ans"; then
-      printf -v "$__var" '%s' "$ans"
-      add_log "OK: $prompt $ans"
-      return 0
-    else
-      add_log "Invalid: $prompt $ans"
-    fi
-  done
+# --- INPUT HANDLERS ---
+
+ask_val() {
+    local prompt="$1"
+    local validator="$2"
+    local output_var="$3"
+    local answer
+
+    while true; do
+        render
+        read -r -e -p "$prompt " answer
+        answer=$(trim "$answer")
+
+        if [[ -z "$answer" ]]; then
+            add_log "Input cannot be empty."
+            continue
+        fi
+
+        if $validator "$answer"; then
+            printf -v "$output_var" "%s" "$answer"
+            add_log "OK: $answer"
+            return 0
+        else
+            add_log "Invalid input: $answer"
+            sleep 1
+        fi
+    done
 }
 
-# --- AUTO IP DETECTION ---
-get_public_ip() {
-    local myip
-    myip=$(curl -s4 -m 5 https://api.ipify.org || curl -s4 -m 5 ifconfig.me)
-    if valid_ipv4 "$myip"; then
-        echo "$myip"
-    else
-        echo ""
-    fi
-}
+ask_ip_smart() {
+    local type="$1" # IRAN or KHAREJ
+    local output_var="$2"
+    local detected
+    local confirm
 
-ask_ip_with_confirmation() {
-    local prompt_text="$1"
-    local variable_name="$2"
-    local detected_ip
-    local user_conf=""
-    
-    detected_ip=$(get_public_ip)
-    
-    # If we are asking for "My IP" (Iran on Iran setup, or Kharej on Kharej setup)
-    # logic depends on context, but let's assume we try to detect THIS server's IP.
-    
-    if [[ -n "$detected_ip" ]]; then
+    detected=$(get_public_ip)
+
+    if valid_ipv4 "$detected"; then
         while true; do
             render
-            echo "Detected Public IP: ${detected_ip}"
-            read -r -p "${prompt_text} Is this correct? (y/n): " user_conf
-            case "${user_conf,,}" in
+            echo "Detected Public IP: $detected"
+            read -r -p "Is this your $type IP? (y/n): " confirm
+            confirm=$(trim "$confirm")
+            case "${confirm,,}" in
                 y|yes)
-                    printf -v "$variable_name" '%s' "$detected_ip"
-                    add_log "IP Accepted: $detected_ip"
+                    printf -v "$output_var" "%s" "$detected"
+                    add_log "Set IP: $detected"
                     return 0
                     ;;
                 n|no)
-                    ask_until_valid "Please Enter IP Manually:" valid_ipv4 "$variable_name"
+                    ask_val "Enter $type IP manually:" valid_ipv4 "$output_var"
                     return 0
                     ;;
                 *)
-                    add_log "Please type y or n."
+                    add_log "Please enter 'y' or 'n'."
                     ;;
             esac
         done
     else
-        ask_until_valid "${prompt_text} (Auto-detect failed):" valid_ipv4 "$variable_name"
+        add_log "Could not detect IP automatically."
+        ask_val "Enter $type IP manually:" valid_ipv4 "$output_var"
     fi
 }
 
-# --- NETWORK PACKAGES ---
-ensure_packages() {
-  add_log "Checking required packages..."
-  render
-  local missing=()
-  command -v ip >/dev/null 2>&1 || missing+=("iproute2")
-  command -v socat >/dev/null 2>&1 || missing+=("socat")
-
-  if ((${#missing[@]}==0)); then
-    return 0
-  fi
-
-  add_log "Installing: ${missing[*]}"
-  render
-  apt-get update -y >/dev/null 2>&1
-  apt-get install -y "${missing[@]}" >/dev/null 2>&1
+ask_ports_smart() {
+    local raw
+    while true; do
+        render
+        echo "Example: 443 OR 2083,8443 OR 2050-2060"
+        read -r -e -p "Forward Ports: " raw
+        raw=$(trim "$raw")
+        
+        if [[ -z "$raw" ]]; then continue; fi
+        
+        # Simple parsing
+        local -a p_list=()
+        local valid=1
+        
+        # Replace commas with spaces
+        local clean="${raw//,/ }"
+        
+        for item in $clean; do
+            if [[ "$item" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                local s="${BASH_REMATCH[1]}"
+                local e="${BASH_REMATCH[2]}"
+                if ((s <= e)) && valid_port "$s" && valid_port "$e"; then
+                    for ((k=s; k<=e; k++)); do p_list+=("$k"); done
+                else
+                    valid=0
+                fi
+            elif valid_port "$item"; then
+                p_list+=("$item")
+            else
+                valid=0
+            fi
+        done
+        
+        if ((valid == 1)) && ((${#p_list[@]} > 0)); then
+            mapfile -t PORT_LIST < <(printf "%s\n" "${p_list[@]}" | sort -n | uniq)
+            add_log "Ports OK: ${#PORT_LIST[@]} ports selected."
+            return 0
+        else
+            add_log "Invalid port format."
+            sleep 1
+        fi
+    done
 }
 
-# --- SERVICE CREATION ---
+# --- CORE FUNCTIONS ---
 
-make_gre_service() {
-  local id="$1" local_ip="$2" remote_ip="$3" local_gre_ip="$4" key="$5" mtu="${6:-}"
-  local unit="gre${id}.service"
-  local path="/etc/systemd/system/${unit}"
+install_deps() {
+    add_log "Checking dependencies..."
+    local need_install=0
+    command -v ip >/dev/null 2>&1 || need_install=1
+    command -v socat >/dev/null 2>&1 || need_install=1
+    
+    if ((need_install == 1)); then
+        render
+        echo "Installing iproute2 & socat..."
+        apt-get update -y >/dev/null 2>&1
+        apt-get install -y iproute2 socat >/dev/null 2>&1
+    fi
+}
 
-  add_log "Creating GRE Service: $unit"
-  
-  local mtu_line=""
-  if [[ -n "$mtu" ]]; then
-    mtu_line="ExecStart=/sbin/ip link set gre${id} mtu ${mtu}"
-  fi
+setup_tunnel_only() {
+    local mode="$1" # IRAN or KHAREJ
+    
+    local ID LOCAL_IP REMOTE_IP GRE_RANGE MTU_VAL="1476"
+    
+    ask_val "Enter GRE ID (Number):" is_int ID
+    
+    if [[ "$mode" == "IRAN" ]]; then
+        ask_ip_smart "IRAN (Local)" LOCAL_IP
+        ask_val "Enter KHAREJ (Remote) IP:" valid_ipv4 REMOTE_IP
+    else
+        ask_ip_smart "KHAREJ (Local)" LOCAL_IP
+        ask_val "Enter IRAN (Remote) IP:" valid_ipv4 REMOTE_IP
+    fi
+    
+    ask_val "GRE Range (e.g., 10.10.10.0):" valid_gre_base GRE_RANGE
+    
+    # MTU Question
+    while true; do
+        render
+        read -r -p "Set custom MTU? Default is 1476. (y/n): " ans
+        case "${ans,,}" in
+            y|yes)
+                ask_val "Enter MTU (576-1600):" valid_mtu MTU_VAL
+                break
+                ;;
+            n|no|"")
+                break
+                ;;
+        esac
+    done
 
-  cat >"$path" <<EOF
+    # Logic
+    local gre_local_ip gre_peer_ip
+    if [[ "$mode" == "IRAN" ]]; then
+        gre_local_ip=$(ipv4_set_last_octet "$GRE_RANGE" 1)
+        gre_peer_ip=$(ipv4_set_last_octet "$GRE_RANGE" 2)
+    else
+        gre_local_ip=$(ipv4_set_last_octet "$GRE_RANGE" 2)
+        gre_peer_ip=$(ipv4_set_last_octet "$GRE_RANGE" 1)
+    fi
+    
+    local key=$((ID * 100))
+    local unit="gre${ID}.service"
+    
+    install_deps
+    
+    add_log "Configuring Service..."
+    
+    # Create Systemd Unit
+    cat > "/etc/systemd/system/${unit}" <<EOF
 [Unit]
-Description=TEEJAY GRE Tunnel ${id}
+Description=TEEJAY GRE Tunnel ${ID}
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c "/sbin/ip tunnel del gre${id} 2>/dev/null || true"
-ExecStart=/sbin/ip tunnel add gre${id} mode gre local ${local_ip} remote ${remote_ip} key ${key} nopmtudisc
-ExecStart=/sbin/ip addr add ${local_gre_ip}/30 dev gre${id}
-${mtu_line}
-ExecStart=/sbin/ip link set gre${id} up
-ExecStop=/sbin/ip link set gre${id} down
-ExecStop=/sbin/ip tunnel del gre${id}
+# CLEANUP
+ExecStart=-/sbin/ip tunnel del gre${ID}
+# CREATE - tunnel mode gre local IP
+ExecStart=/sbin/ip tunnel add gre${ID} mode gre local ${LOCAL_IP} remote ${REMOTE_IP} key ${key} nopmtudisc
+# IP ASSIGN
+ExecStart=/sbin/ip addr add ${gre_local_ip}/30 dev gre${ID}
+# MTU
+ExecStart=/sbin/ip link set gre${ID} mtu ${MTU_VAL}
+# UP
+ExecStart=/sbin/ip link set gre${ID} up
+
+ExecStop=/sbin/ip link set gre${ID} down
+ExecStop=/sbin/ip tunnel del gre${ID}
 
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemctl enable --now "$unit" >/dev/null 2>&1
-}
 
-make_keepalive_service() {
-    local id="$1" peer_gre_ip="$2"
-    local unit="keepalive-gre${id}.service"
-    local path="/etc/systemd/system/${unit}"
-    
-    add_log "Creating Keepalive (Anti-Disconnect) for GRE${id}..."
-    
-    cat >"$path" <<EOF
+    # Keepalive Service
+    local ka_unit="keepalive-gre${ID}.service"
+    cat > "/etc/systemd/system/${ka_unit}" <<EOF
 [Unit]
-Description=TEEJAY Keepalive for GRE${id}
-After=gre${id}.service
-Requires=gre${id}.service
+Description=Keepalive for GRE${ID}
+After=${unit}
 
 [Service]
 Type=simple
-ExecStart=/bin/ping -i 10 ${peer_gre_ip}
+ExecStart=/bin/ping -i 10 ${gre_peer_ip}
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl enable --now "$unit" >/dev/null 2>&1
-}
 
-make_fw_service() {
-  local id="$1" port="$2" target_ip="$3"
-  local unit="fw-gre${id}-${port}.service"
-  local path="/etc/systemd/system/${unit}"
-
-  if [[ -f "$path" ]]; then
-     add_log "Forwarder exists: $unit"
-     return 0
-  fi
-
-  add_log "Creating Forwarder: $port -> $target_ip"
-  
-  cat >"$path" <<EOF
-[Unit]
-Description=Forward Port ${port} via GRE${id}
-After=network-online.target gre${id}.service
-
-[Service]
-ExecStart=/usr/bin/socat TCP4-LISTEN:${port},reuseaddr,fork TCP4:${target_ip}:${port}
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl enable --now "$unit" >/dev/null 2>&1
-}
-
-ask_ports() {
-  local prompt="Forward Ports (e.g. 80 | 80,443 | 2050-2060):"
-  local raw=""
-  while true; do
-    render
-    read -r -e -p "$prompt " raw
-    raw="$(trim "$raw")"
-    raw="${raw// /}"
-
-    if [[ -z "$raw" ]]; then continue; fi
-
-    local -a ports=()
-    local ok=1
-
-    if [[ "$raw" =~ ^[0-9]+$ ]]; then
-      valid_port "$raw" && ports+=("$raw") || ok=0
-    elif [[ "$raw" =~ ^[0-9]+-[0-9]+$ ]]; then
-      local s="${raw%-*}"
-      local e="${raw#*-}"
-      if valid_port "$s" && valid_port "$e" && ((s<=e)); then
-        local p
-        for ((p=s; p<=e; p++)); do ports+=("$p"); done
-      else
-        ok=0
-      fi
-    elif [[ "$raw" =~ ^[0-9]+(,[0-9]+)+$ ]]; then
-      IFS=',' read -r -a parts <<<"$raw"
-      local part
-      for part in "${parts[@]}"; do
-        valid_port "$part" && ports+=("$part") || { ok=0; break; }
-      done
-    else
-      ok=0
-    fi
-
-    if ((ok==0)); then
-      add_log "Invalid port format."
-      continue
-    fi
-
-    mapfile -t PORT_LIST < <(printf "%s\n" "${ports[@]}" | awk '!seen[$0]++' | sort -n)
-    add_log "Ports selected: ${#PORT_LIST[@]}"
-    return 0
-  done
-}
-
-# --- MAIN FUNCTIONS ---
-
-setup_iran_local() {
-    # 1. TUNNEL SETUP ONLY
-    local ID IRANIP KHAREJIP GREBASE
+    systemctl daemon-reload
+    systemctl enable --now "${unit}" >/dev/null 2>&1
+    systemctl enable --now "${ka_unit}" >/dev/null 2>&1
     
-    ask_until_valid "GRE ID (Number):" is_int ID
-    
-    # Auto detect for Iran IP
-    ask_ip_with_confirmation "Your IRAN IP:" IRANIP
-    
-    ask_until_valid "KHAREJ IP:" valid_ipv4 KHAREJIP
-    ask_until_valid "GRE Range (e.g. 10.10.10.0):" valid_gre_base GREBASE
-    
-    local use_mtu="n" MTU_VALUE=""
-    render
-    read -r -p "Set custom MTU? (y/n): " use_mtu
-    if [[ "${use_mtu,,}" == "y" ]]; then
-        ask_until_valid "MTU (576-1600):" valid_mtu MTU_VALUE
-    fi
-
-    local key=$((ID*100))
-    local local_gre_ip peer_gre_ip
-    local_gre_ip="$(ipv4_set_last_octet "$GREBASE" 1)"
-    peer_gre_ip="$(ipv4_set_last_octet "$GREBASE" 2)"
-
-    ensure_packages
-    
-    make_gre_service "$ID" "$IRANIP" "$KHAREJIP" "$local_gre_ip" "$key" "$MTU_VALUE"
-    
-    # Add Keepalive to prevent disconnect
-    make_keepalive_service "$ID" "$peer_gre_ip"
-    
-    add_log "IRAN Local Tunnel Setup Complete."
-    add_log "GRE IP: $local_gre_ip"
+    add_log "Tunnel GRE${ID} Setup Done."
+    add_log "Mode: GRE | Local: ${LOCAL_IP} | MTU: ${MTU_VAL}"
     pause_enter
 }
 
-setup_kharej_local() {
-    # 2. TUNNEL SETUP ONLY
-    local ID KHAREJIP IRANIP GREBASE
-    
-    ask_until_valid "GRE ID (Same as Iran):" is_int ID
-    
-    # Auto detect for Kharej IP
-    ask_ip_with_confirmation "Your KHAREJ IP:" KHAREJIP
-    
-    ask_until_valid "IRAN IP:" valid_ipv4 IRANIP
-    ask_until_valid "GRE Range (Same as Iran):" valid_gre_base GREBASE
-    
-    local use_mtu="n" MTU_VALUE=""
-    render
-    read -r -p "Set custom MTU? (y/n): " use_mtu
-    if [[ "${use_mtu,,}" == "y" ]]; then
-        ask_until_valid "MTU (576-1600):" valid_mtu MTU_VALUE
-    fi
-
-    local key=$((ID*100))
-    local local_gre_ip peer_gre_ip
-    local_gre_ip="$(ipv4_set_last_octet "$GREBASE" 2)"
-    peer_gre_ip="$(ipv4_set_last_octet "$GREBASE" 1)"
-    
-    ensure_packages
-    
-    make_gre_service "$ID" "$KHAREJIP" "$IRANIP" "$local_gre_ip" "$key" "$MTU_VALUE"
-    
-    # Keepalive is good on Kharej side too, just in case
-    make_keepalive_service "$ID" "$peer_gre_ip"
-
-    add_log "KHAREJ Local Tunnel Setup Complete."
-    add_log "GRE IP: $local_gre_ip"
-    pause_enter
-}
-
-local_connectivity_check() {
-    # 3. PING TEST
-    render
-    echo "Scanning active GRE tunnels..."
-    
-    # Find active GRE services
+port_forward_menu() {
+    # Scan for GRE services
     local ids=()
-    while IFS= read -r u; do
-        if [[ "$u" =~ gre([0-9]+)\.service ]]; then
+    # Ugly but safe grep
+    for f in /etc/systemd/system/gre*.service; do
+        [[ -e "$f" ]] || break
+        local fname="${f##*/}"
+        if [[ "$fname" =~ ^gre([0-9]+)\.service$ ]]; then
             ids+=("${BASH_REMATCH[1]}")
         fi
-    done < <(systemctl list-units --state=active --no-legend "gre*.service" | awk '{print $1}')
+    done
     
     if ((${#ids[@]} == 0)); then
-        die_soft "No active GRE tunnels found."
-        return 0
+        add_log "No Tunnels Found. Setup Local First."
+        pause_enter
+        return
     fi
     
-    echo "Select Tunnel to Ping:"
-    local i=0
-    for id in "${ids[@]}"; do
-        ((i++))
-        echo "$i) GRE${id}"
+    render
+    echo "Select Tunnel to Forward Ports on:"
+    local c=0
+    for i in "${ids[@]}"; do
+        echo "$((++c))) GRE${i}"
     done
     
     local choice
     read -r -p "Select: " choice
-    if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice>=1 && choice<=i)); then
-        local sel_id="${ids[$((choice-1))]}"
-        
-        # Determine peer IP logic (simple heuristic based on .1 and .2)
-        local my_gre_ip
-        my_gre_ip=$(ip -4 addr show dev "gre${sel_id}" | grep -oP 'inet \K[\d.]+')
-        
-        if [[ -z "$my_gre_ip" ]]; then
-            add_log "Interface gre${sel_id} has no IP!"
-        else
-            local base="${my_gre_ip%.*}"
-            local last="${my_gre_ip##*.}"
-            local peer_ip=""
-            if [[ "$last" == "1" ]]; then peer_ip="${base}.2"; else peer_ip="${base}.1"; fi
-            
-            add_log "Pinging Peer: $peer_ip ..."
-            render
-            ping -c 4 "$peer_ip"
-            echo
-            add_log "Ping test finished."
-        fi
-    else
-        add_log "Invalid selection."
-    fi
-    pause_enter
-}
-
-tunnel_port_forward() {
-    # 4. FORWARDING
-    mapfile -t GRE_IDS < <(systemctl list-unit-files --no-legend "gre*.service" | awk '{print $1}' | grep -oP 'gre\K\d+')
-    
-    if ((${#GRE_IDS[@]} == 0)); then
-        die_soft "No GRE Tunnels found. Please setup Local first."
-        return 0
-    fi
-
-    render
-    echo "Available Tunnels:"
-    local i=0
-    for id in "${GRE_IDS[@]}"; do
-        ((i++))
-        echo "$i) GRE${id}"
-    done
-    
-    local choice
-    read -r -p "Select Tunnel to Forward: " choice
-    if [[ ! "$choice" =~ ^[0-9]+$ ]] || ((choice<1 || choice>i)); then
-        add_log "Invalid selection."
-        return 0
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || ((choice < 1 || choice > c)); then
+        add_log "Invalid selection"
+        pause_enter
+        return
     fi
     
-    local id="${GRE_IDS[$((choice-1))]}"
+    local sel_id="${ids[$((choice-1))]}"
     
-    # Get Peer IP automatically
-    local my_gre_ip
-    my_gre_ip=$(ip -4 addr show dev "gre${id}" 2>/dev/null | grep -oP 'inet \K[\d.]+')
+    # Calculate Peer IP logic again
+    # Read from unit file to be safe
+    local ufile="/etc/systemd/system/gre${sel_id}.service"
+    local grep_ip
+    grep_ip=$(grep -oP 'ip addr add \K[0-9.]+' "$ufile")
     
-    if [[ -z "$my_gre_ip" ]]; then
-        die_soft "GRE${id} is not up or has no IP."
-        return 0
+    if [[ -z "$grep_ip" ]]; then
+        add_log "Could not read IP from service file."
+        pause_enter
+        return
     fi
     
-    local base="${my_gre_ip%.*}"
-    local last="${my_gre_ip##*.}"
-    local peer_ip=""
-    # Assuming standard .1 <-> .2 topology from setup
+    local base="${grep_ip%.*}"
+    local last="${grep_ip##*.}"
+    local peer_ip
+    
     if [[ "$last" == "1" ]]; then peer_ip="${base}.2"; else peer_ip="${base}.1"; fi
     
-    add_log "Selected GRE${id}. Local: $my_gre_ip -> Peer: $peer_ip"
+    add_log "Forwarding via GRE${sel_id} -> Peer: ${peer_ip}"
     
-    PORT_LIST=()
-    ask_ports
-    
-    ensure_packages
+    ask_ports_smart
+    install_deps
     
     for p in "${PORT_LIST[@]}"; do
-        make_fw_service "$id" "$p" "$peer_ip"
+        local fw_unit="fw-gre${sel_id}-${p}.service"
+        cat > "/etc/systemd/system/${fw_unit}" <<EOF
+[Unit]
+Description=Forward Port ${p} over GRE${sel_id}
+After=gre${sel_id}.service
+
+[Service]
+ExecStart=/usr/bin/socat TCP4-LISTEN:${p},reuseaddr,fork TCP4:${peer_ip}:${p}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl enable --now "${fw_unit}" >/dev/null 2>&1
     done
     
-    systemctl daemon-reload
     add_log "Forwarding Setup Complete."
     pause_enter
 }
 
-# --- AUTOMATION (Kept mostly as is but cleaned up) ---
-automation_menu() {
-    # 5. AUTOMATION
-    # Minimal implementation for IP changes
+check_connectivity() {
     render
-    echo "Automation Menu (Update IP on Cron)"
-    echo "1) Create Update Script"
-    echo "2) Delete Automation"
-    echo "0) Back"
-    read -r -p "Select: " sel
+    echo "Running connectivity check..."
+    # Find active tunnels
+    local active_tunnels
+    active_tunnels=$(ip -o tunnel show | grep gre | awk -F: '{print $1}')
     
-    case "$sel" in
-        1) 
-           # Logic to create the cron job script
-           # (Simplified for brevity, uses the same logic as previous script)
-           add_log "Feature placeholder - Use previous script logic if needed specifically."
-           pause_enter
-           ;;
-        2)
-           # Logic to remove cron
-           crontab -r 2>/dev/null
-           add_log "Automation removed."
-           pause_enter
-           ;;
-        *) return 0 ;;
-    esac
+    if [[ -z "$active_tunnels" ]]; then
+        add_log "No active tunnels in kernel."
+        pause_enter
+        return
+    fi
+    
+    for t in $active_tunnels; do
+        local my_ip
+        my_ip=$(ip -4 addr show dev "$t" | grep -oP 'inet \K[\d.]+')
+        if [[ -n "$my_ip" ]]; then
+            local base="${my_ip%.*}"
+            local last="${my_ip##*.}"
+            local peer
+            if [[ "$last" == "1" ]]; then peer="${base}.2"; else peer="${base}.1"; fi
+            
+            echo "--------------------------------"
+            echo "Tunnel: $t | My IP: $my_ip"
+            echo "Pinging Peer: $peer ..."
+            ping -c 3 -W 1 "$peer"
+            echo "--------------------------------"
+        fi
+    done
+    pause_enter
 }
 
-uninstall_clean() {
+uninstall() {
     render
-    read -r -p "Type YES to delete ALL TEEJAY tunnels and services: " conf
-    if [[ "$conf" == "YES" ]]; then
-        systemctl stop $(systemctl list-unit-files | grep -E 'gre|fw-gre|keepalive-gre' | awk '{print $1}') 2>/dev/null
-        systemctl disable $(systemctl list-unit-files | grep -E 'gre|fw-gre|keepalive-gre' | awk '{print $1}') 2>/dev/null
+    read -r -p "Type 'delete' to remove ALL TEEJAY configs: " ans
+    if [[ "$ans" == "delete" ]]; then
+        systemctl stop gre*.service fw-gre*.service keepalive-gre*.service 2>/dev/null
+        systemctl disable gre*.service fw-gre*.service keepalive-gre*.service 2>/dev/null
         rm -f /etc/systemd/system/gre*.service
         rm -f /etc/systemd/system/fw-gre*.service
         rm -f /etc/systemd/system/keepalive-gre*.service
@@ -574,33 +511,31 @@ uninstall_clean() {
     pause_enter
 }
 
-main_menu() {
-  while true; do
+# --- MAIN LOOP ---
+
+if [[ $EUID -ne 0 ]]; then
+   echo "Run as root!"
+   exit 1
+fi
+
+while true; do
     render
-    echo "1 > Setup IRAN Local (Tunnel Only)"
-    echo "2 > Setup KHAREJ Local (Tunnel Only)"
-    echo "3 > Local Connectivity Check (Ping)"
-    echo "4 > Tunnel and Port Forward"
-    echo "5 > Automation (Coming Soon)"
-    echo "6 > Uninstall & Clean"
+    echo "1 > Setup IRAN Local (Tunnel Mode)"
+    echo "2 > Setup KHAREJ Local (Tunnel Mode)"
+    echo "3 > Connectivity Check (Ping)"
+    echo "4 > Add Port Forwarding"
+    echo "5 > Uninstall & Clean"
     echo "0 > Exit"
     echo
-    read -r -e -p "Select option: " choice
-    choice="$(trim "$choice")"
-
-    case "$choice" in
-      1) add_log "Selected: IRAN Local"; setup_iran_local ;;
-      2) add_log "Selected: KHAREJ Local"; setup_kharej_local ;;
-      3) add_log "Selected: Connectivity Check"; local_connectivity_check ;;
-      4) add_log "Selected: Port Forward"; tunnel_port_forward ;;
-      5) add_log "Selected: Automation"; automation_menu ;;
-      6) add_log "Selected: Uninstall"; uninstall_clean ;;
-      0) exit 0 ;;
-      *) add_log "Invalid option: $choice" ;;
+    read -r -p "Select: " opt
+    
+    case "$opt" in
+        1) setup_tunnel_only "IRAN" ;;
+        2) setup_tunnel_only "KHAREJ" ;;
+        3) check_connectivity ;;
+        4) port_forward_menu ;;
+        5) uninstall ;;
+        0) exit 0 ;;
+        *) add_log "Invalid Option" ;;
     esac
-  done
-}
-
-ensure_root "$@"
-add_log "Welcome to TEEJAY Tunnel Manager"
-main_menu
+done
