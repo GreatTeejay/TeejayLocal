@@ -1,35 +1,48 @@
 #!/usr/bin/env bash
+# teejay.sh
+# TEEJAY - GRE + Forwarder Manager (Local setup جدا از Tunnel/Forwarder)
 
 set +e
 set +u
 export LC_ALL=C
 
-# --- COLORS & STYLING ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m' # No Color
-
+# ----------------------------- UI / THEME ------------------------------
 LOG_LINES=()
-LOG_MIN=3
-LOG_MAX=10
+LOG_MIN=4
+LOG_MAX=12
 
-# --- BANNER & UI ---
+# Colors (safe fallback)
+if command -v tput >/dev/null 2>&1; then
+  C_RESET="$(tput sgr0)"
+  C_BOLD="$(tput bold)"
+  C_DIM="$(tput dim)"
+  C_CYAN="$(tput setaf 6)"
+  C_GREEN="$(tput setaf 2)"
+  C_YELLOW="$(tput setaf 3)"
+  C_RED="$(tput setaf 1)"
+  C_MAGENTA="$(tput setaf 5)"
+else
+  C_RESET=""; C_BOLD=""; C_DIM=""
+  C_CYAN=""; C_GREEN=""; C_YELLOW=""; C_RED=""; C_MAGENTA=""
+fi
 
 banner() {
   cat <<EOF
-${CYAN}
-  ████████╗███████╗███████╗     ██╗ █████╗ ██╗   ██╗
-  ╚══██╔══╝██╔════╝██╔════╝     ██║██╔══██╗╚██╗ ██╔╝
-     ██║   █████╗  █████╗       ██║███████║ ╚████╔╝ 
-     ██║   ██╔══╝  ██╔══╝  ██   ██║██╔══██║  ╚██╔╝  
-     ██║   ███████╗███████╗╚█████╔╝██║  ██║   ██║   
-     ╚═╝   ╚══════╝╚══════╝ ╚════╝ ╚═╝  ╚═╝   ╚═╝   
-${PURPLE}       >>> NETWORK TUNNEL AUTOMATION V2 <<<${NC}
+${C_CYAN}${C_BOLD}
+╔══════════════════════════════════════════════════════════════════════╗
+║                                                                      ║
+║     ████████╗███████╗███████╗     ██╗ █████╗ ██╗   ██╗               ║
+║     ╚══██╔══╝██╔════╝██╔════╝     ██║██╔══██╗╚██╗ ██╔╝               ║
+║        ██║   █████╗  █████╗       ██║███████║ ╚████╔╝                ║
+║        ██║   ██╔══╝  ██╔══╝       ██║██╔══██║  ╚██╔╝                 ║
+║        ██║   ███████╗███████╗     ██║██║  ██║   ██║                  ║
+║        ╚═╝   ╚══════╝╚══════╝     ╚═╝╚═╝  ╚═╝   ╚═╝                  ║
+║                                                                      ║
+║                         T E E J A Y                                  ║
+║                 Local Setup  |  Tunnel/Forwarder                     ║
+║                                                                      ║
+╚══════════════════════════════════════════════════════════════════════╝
+${C_RESET}
 EOF
 }
 
@@ -52,7 +65,7 @@ render() {
   ((height < LOG_MIN)) && height=$LOG_MIN
   ((height > LOG_MAX)) && height=$LOG_MAX
 
-  echo -e "${BOLD}┌───────────────────────────── ${YELLOW}ACTION LOG${NC}${BOLD} ─────────────────────────────┐${NC}"
+  echo "${C_DIM}┌────────────────────────────── ACTION LOG ──────────────────────────────┐${C_RESET}"
   local start_index=0
   if ((${#LOG_LINES[@]} > height)); then
     start_index=$((${#LOG_LINES[@]} - height))
@@ -61,42 +74,38 @@ render() {
   local i line
   for ((i=start_index; i<${#LOG_LINES[@]}; i++)); do
     line="${LOG_LINES[$i]}"
-    # Strip colors for length calculation if needed, but keeping it simple
-    printf "│ %-68s │\n" "$line"
+    printf "│ %-73s │\n" "$line"
   done
 
   local missing=$((height - (${#LOG_LINES[@]} - start_index)))
   for ((i=0; i<missing; i++)); do
-    printf "│ %-68s │\n" ""
+    printf "│ %-73s │\n" ""
   done
 
-  echo -e "${BOLD}└──────────────────────────────────────────────────────────────────────┘${NC}"
+  echo "${C_DIM}└─────────────────────────────────────────────────────────────────────────┘${C_RESET}"
   echo
 }
 
 pause_enter() {
   echo
-  echo -e "${CYAN}Press ${BOLD}ENTER${NC}${CYAN} to return to menu...${NC}"
-  read -r _
+  read -r -p "Press ENTER to return..." _
 }
 
 die_soft() {
-  add_log "ERROR: $1"
+  add_log "${C_RED}ERROR:${C_RESET} $1"
   render
   pause_enter
 }
 
 ensure_root() {
   if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}This script must be run as root.${NC}"
+    echo "This script must be run as root. Re-running with sudo..."
     exec sudo -E bash "$0" "$@"
   fi
 }
 
 trim() { sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' <<<"$1"; }
 is_int() { [[ "$1" =~ ^[0-9]+$ ]]; }
-
-# --- VALIDATORS ---
 
 valid_octet() {
   local o="$1"
@@ -112,7 +121,7 @@ valid_ipv4() {
 
 valid_port() {
   local p="$1"
-  is_int "$p" || return 1
+  [[ "$p" =~ ^[0-9]+$ ]] || return 1
   ((p>=1 && p<=65535))
 }
 
@@ -123,108 +132,66 @@ valid_gre_base() {
   return 0
 }
 
-valid_mtu() {
-  local m="$1"
-  [[ "$m" =~ ^[0-9]+$ ]] || return 1
-  ((m>=576 && m<=1600))
-}
-
 ipv4_set_last_octet() {
   local ip="$1" last="$2"
   IFS='.' read -r a b c d <<<"$ip"
   echo "${a}.${b}.${c}.${last}"
 }
 
-# --- INPUT HELPERS ---
-
 ask_until_valid() {
   local prompt="$1" validator="$2" __var="$3"
   local ans=""
   while true; do
     render
-    echo -e "${GREEN}?? ${NC}$prompt"
-    read -r -e -p "   > " ans
+    read -r -e -p "$prompt " ans
     ans="$(trim "$ans")"
     if [[ -z "$ans" ]]; then
-      add_log "Empty input. Try again."
+      add_log "${C_YELLOW}Empty input.${C_RESET} دوباره وارد کن."
       continue
     fi
     if "$validator" "$ans"; then
       printf -v "$__var" '%s' "$ans"
-      add_log "OK: Value accepted."
+      add_log "${C_GREEN}OK:${C_RESET} $prompt $ans"
       return 0
     else
-      add_log "Invalid input. Check format."
+      add_log "${C_RED}Invalid:${C_RESET} $prompt $ans"
     fi
   done
 }
 
-get_public_ip() {
-    local ip
-    ip=$(curl -s --max-time 3 -4 ifconfig.me)
-    if valid_ipv4 "$ip"; then
-        echo "$ip"
+ask_yes_no() {
+  # usage: ask_yes_no "question" default(y/n) => echo y|n
+  local q="$1" def="${2:-y}" ans=""
+  while true; do
+    render
+    if [[ "$def" == "y" ]]; then
+      read -r -p "$q [Y/n]: " ans
+      ans="$(trim "$ans")"
+      [[ -z "$ans" ]] && ans="y"
     else
-        echo ""
+      read -r -p "$q [y/N]: " ans
+      ans="$(trim "$ans")"
+      [[ -z "$ans" ]] && ans="n"
     fi
-}
-
-ask_ip_interactive() {
-    local prompt_text="$1"
-    local __result_var="$2"
-    local detected_ip
-    local user_choice
-    
-    detected_ip=$(get_public_ip)
-    
-    while true; do
-        render
-        echo -e "${GREEN}?? ${NC}$prompt_text"
-        
-        if [[ -n "$detected_ip" ]]; then
-            echo -e "   Detected IP: ${YELLOW}$detected_ip${NC}"
-            read -r -p "   Is this correct? (y/n): " user_choice
-            user_choice="$(trim "${user_choice,,}")"
-            
-            if [[ "$user_choice" == "y" || "$user_choice" == "yes" ]]; then
-                printf -v "$__result_var" '%s' "$detected_ip"
-                add_log "IP Auto-Selected: $detected_ip"
-                return 0
-            elif [[ "$user_choice" == "n" || "$user_choice" == "no" ]]; then
-                detected_ip="" # Force manual entry loop
-                continue
-            else
-                 add_log "Please answer 'y' or 'n'."
-                 continue
-            fi
-        fi
-
-        # Manual Entry
-        read -r -e -p "   Enter IP Manually: " user_choice
-        user_choice="$(trim "$user_choice")"
-        
-        if valid_ipv4 "$user_choice"; then
-             printf -v "$__result_var" '%s' "$user_choice"
-             add_log "IP Manually Set: $user_choice"
-             return 0
-        else
-             add_log "Invalid IPv4 format."
-        fi
-    done
+    case "${ans,,}" in
+      y|yes) echo "y"; return 0 ;;
+      n|no)  echo "n"; return 0 ;;
+      *) add_log "لطفاً فقط y یا n بزن." ;;
+    esac
+  done
 }
 
 ask_ports() {
-  local prompt="Forward PORTs (e.g: 80 | 80,443 | 2000-3000):"
+  local prompt="Forward PORT(s) (مثال: 80 | 80,2053 | 2050-2060):"
   local raw=""
   while true; do
     render
-    echo -e "${GREEN}?? ${NC}$prompt"
-    read -r -e -p "   > " raw
+    read -r -e -p "$prompt " raw
     raw="$(trim "$raw")"
     raw="${raw// /}"
 
     if [[ -z "$raw" ]]; then
-      add_log "Empty ports. Try again."
+      add_log "${C_YELLOW}Empty ports.${C_RESET} دوباره وارد کن."
       continue
     fi
 
@@ -255,53 +222,117 @@ ask_ports() {
     fi
 
     if ((ok==0)); then
-      add_log "Invalid format."
-      add_log "Examples: 443 OR 80,443 OR 8000-9000"
+      add_log "${C_RED}Invalid ports:${C_RESET} $raw"
+      add_log "Examples: 80 | 80,2053 | 2050-2060"
       continue
     fi
 
     mapfile -t PORT_LIST < <(printf "%s\n" "${ports[@]}" | awk '!seen[$0]++' | sort -n)
-    add_log "Ports queued: ${#PORT_LIST[@]} ports"
+    add_log "${C_GREEN}Ports accepted:${C_RESET} ${PORT_LIST[*]}"
     return 0
   done
 }
 
-# --- SYSTEM & SERVICE FUNCTIONS ---
-
+# ----------------------------- Networking helpers ------------------------------
 ensure_packages() {
-  add_log "Checking requirements..."
+  add_log "Checking required packages: iproute2, socat, curl"
   render
   local missing=()
   command -v ip >/dev/null 2>&1 || missing+=("iproute2")
   command -v socat >/dev/null 2>&1 || missing+=("socat")
+  command -v curl >/dev/null 2>&1 || missing+=("curl")
 
   if ((${#missing[@]}==0)); then
+    add_log "All required packages are installed."
     return 0
   fi
 
-  add_log "Installing: ${missing[*]}"
+  add_log "Installing missing packages: ${missing[*]}"
   render
   apt-get update -y >/dev/null 2>&1
-  apt-get install -y "${missing[@]}" >/dev/null 2>&1 && add_log "Installed successfully." || return 1
+  apt-get install -y "${missing[@]}" >/dev/null 2>&1 && add_log "Packages installed successfully." || return 1
   return 0
+}
+
+ensure_iproute_only() {
+  add_log "Checking required package: iproute2"
+  render
+
+  if command -v ip >/dev/null 2>&1; then
+    add_log "iproute2 is already installed."
+    return 0
+  fi
+
+  add_log "Installing missing package: iproute2"
+  render
+  apt-get update -y >/dev/null 2>&1
+  apt-get install -y iproute2 >/dev/null 2>&1 && add_log "iproute2 installed successfully." || return 1
+  return 0
+}
+
+detect_public_ipv4() {
+  # Best-effort public IPv4 detection (multiple providers)
+  local ip=""
+  ip="$(curl -4 -fsS --max-time 3 https://api64.ipify.org 2>/dev/null || true)"
+  valid_ipv4 "$ip" && { echo "$ip"; return 0; }
+
+  ip="$(curl -4 -fsS --max-time 3 https://ipv4.icanhazip.com 2>/dev/null | tr -d '\r\n' || true)"
+  valid_ipv4 "$ip" && { echo "$ip"; return 0; }
+
+  ip="$(curl -4 -fsS --max-time 3 https://ifconfig.me/ip 2>/dev/null | tr -d '\r\n' || true)"
+  valid_ipv4 "$ip" && { echo "$ip"; return 0; }
+
+  return 1
+}
+
+valid_mtu() {
+  local m="$1"
+  [[ "$m" =~ ^[0-9]+$ ]] || return 1
+  ((m>=576 && m<=1600))
 }
 
 systemd_reload() { systemctl daemon-reload >/dev/null 2>&1; }
 unit_exists() { [[ -f "/etc/systemd/system/$1" ]]; }
 enable_now() { systemctl enable --now "$1" >/dev/null 2>&1; }
 
+show_unit_status_brief() {
+  systemctl --no-pager --full status "$1" 2>&1 | sed -n '1,12p'
+}
+
+ensure_mtu_line_in_unit() {
+  local id="$1" mtu="$2" file="$3"
+  [[ -f "$file" ]] || return 0
+
+  if grep -qE "^ExecStart=/sbin/ip link set gre${id} mtu[[:space:]]+[0-9]+$" "$file"; then
+    sed -i.bak -E "s|^ExecStart=/sbin/ip link set gre${id} mtu[[:space:]]+[0-9]+$|ExecStart=/sbin/ip link set gre${id} mtu ${mtu}|" "$file"
+    add_log "Updated MTU line in: $file"
+    return 0
+  fi
+
+  if grep -qE "^ExecStart=/sbin/ip link set gre${id} up$" "$file"; then
+    sed -i.bak -E "s|^ExecStart=/sbin/ip link set gre${id} up$|ExecStart=/sbin/ip link set gre${id} mtu ${mtu}\nExecStart=/sbin/ip link set gre${id} up|" "$file"
+    add_log "Inserted MTU line in: $file"
+    return 0
+  fi
+
+  printf "\nExecStart=/sbin/ip link set gre%s mtu %s\n" "$id" "$mtu" >> "$file"
+  add_log "WARNING: 'ip link set gre${id} up' not found; appended MTU line at end: $file"
+}
+
+# ----------------------------- Systemd service builders ------------------------------
 make_gre_service() {
   local id="$1" local_ip="$2" remote_ip="$3" local_gre_ip="$4" key="$5" mtu="${6:-}"
   local unit="gre${id}.service"
   local path="/etc/systemd/system/${unit}"
 
   if unit_exists "$unit"; then
-    add_log "Service $unit already exists. Skipping."
+    add_log "${C_YELLOW}Service already exists:${C_RESET} $unit"
     return 2
   fi
 
-  add_log "Generating Service: $unit"
-  
+  add_log "Creating: $path"
+  render
+
   local mtu_line=""
   if [[ -n "$mtu" ]]; then
     mtu_line="ExecStart=/sbin/ip link set gre${id} mtu ${mtu}"
@@ -328,7 +359,8 @@ ExecStop=/sbin/ip tunnel del gre${id}
 WantedBy=multi-user.target
 EOF
 
-  [[ $? -eq 0 ]] && return 0 || return 1
+  [[ $? -eq 0 ]] && add_log "${C_GREEN}GRE service created:${C_RESET} $unit" || return 1
+  return 0
 }
 
 make_fw_service() {
@@ -337,9 +369,12 @@ make_fw_service() {
   local path="/etc/systemd/system/${unit}"
 
   if unit_exists "$unit"; then
-    add_log "FW Exists: $unit"
+    add_log "Forwarder exists, skip: $unit"
     return 0
   fi
+
+  add_log "Creating forwarder: fw-gre${id}-${port}"
+  render
 
   cat >"$path" <<EOF
 [Unit]
@@ -355,37 +390,71 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 EOF
+
+  [[ $? -eq 0 ]] && add_log "${C_GREEN}Forwarder created:${C_RESET} fw-gre${id}-${port}" || add_log "Failed writing forwarder: $unit"
 }
 
-# --- CORE SETUP LOGIC ---
+apply_rpfilter_relax() {
+  sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
+  sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
+}
 
-setup_iran_local() {
+# ----------------------------- Local Setup (Smooth) ------------------------------
+ask_local_ip_smooth() {
+  # usage: ask_local_ip_smooth "IRAN" varname
+  local label="$1" __var="$2"
+  local detected=""
+  detected="$(detect_public_ipv4 || true)"
+
+  if valid_ipv4 "$detected"; then
+    add_log "Detected ${label} public IP: ${C_CYAN}${detected}${C_RESET}"
+    local yn
+    yn="$(ask_yes_no "اینـه آیپی ${label} ت؟  ${C_CYAN}${detected}${C_RESET}" "y")"
+    if [[ "$yn" == "y" ]]; then
+      printf -v "$__var" '%s' "$detected"
+      add_log "${C_GREEN}Using detected IP:${C_RESET} $detected"
+      return 0
+    fi
+    add_log "OK، دستی وارد کن."
+  else
+    add_log "${C_YELLOW}Could not detect public IP automatically.${C_RESET} دستی وارد کن."
+  fi
+
+  local manual=""
+  ask_until_valid "${label} IP (manual):" valid_ipv4 manual
+  printf -v "$__var" '%s' "$manual"
+  return 0
+}
+
+iran_local_setup() {
   local ID IRANIP KHAREJIP GREBASE
   local use_mtu="n" MTU_VALUE=""
 
-  ask_until_valid "GRE Number (Unique ID):" is_int ID
-  
-  # New IP Logic
-  ask_ip_interactive "Enter IRAN (Local) IP:" IRANIP
+  add_log "${C_MAGENTA}Wizard:${C_RESET} IRAN Local Setup (فقط GRE، بدون Forwarder)"
+  ask_until_valid "GRE Number :" is_int ID
 
-  ask_until_valid "KHAREJ (Remote) IP:" valid_ipv4 KHAREJIP
-  ask_until_valid "GRE IP Range (e.g. 10.10.10.0):" valid_gre_base GREBASE
+  # Smooth IP confirm
+  ask_local_ip_smooth "IRAN" IRANIP
+
+  ask_until_valid "KHAREJ IP (remote) :" valid_ipv4 KHAREJIP
+  ask_until_valid "GRE IP RANGE base (Example: 10.80.70.0) :" valid_gre_base GREBASE
 
   while true; do
     render
-    echo -e "${GREEN}?? ${NC}Set Custom MTU? (Default is standard)"
-    read -r -p "   (y/n) > " use_mtu
+    read -r -p "set custom MTU? (y/n): " use_mtu
     use_mtu="$(trim "$use_mtu")"
     case "${use_mtu,,}" in
       y|yes)
-        ask_until_valid "Custom MTU (576-1600):" valid_mtu MTU_VALUE
+        ask_until_valid "custom MTU for GRE (576-1600):" valid_mtu MTU_VALUE
         break
         ;;
       n|no|"")
         MTU_VALUE=""
         break
         ;;
-      *) add_log "Please enter y or n." ;;
+      *)
+        add_log "Invalid input. Please enter y or n."
+        ;;
     esac
   done
 
@@ -393,51 +462,63 @@ setup_iran_local() {
   local local_gre_ip peer_gre_ip
   local_gre_ip="$(ipv4_set_last_octet "$GREBASE" 1)"
   peer_gre_ip="$(ipv4_set_last_octet "$GREBASE" 2)"
-  
-  ensure_packages || { die_soft "Install failed."; return 0; }
+  add_log "KEY=${key} | IRAN(GRE)=${local_gre_ip} | KHAREJ(GRE)=${peer_gre_ip}"
+
+  ensure_iproute_only || { die_soft "Package installation failed (iproute2)."; return 0; }
 
   make_gre_service "$ID" "$IRANIP" "$KHAREJIP" "$local_gre_ip" "$key" "$MTU_VALUE"
   local rc=$?
-  [[ $rc -eq 2 ]] && { die_soft "Service already exists!"; return 0; }
-  [[ $rc -ne 0 ]] && { die_soft "Failed creating GRE file."; return 0; }
+  [[ $rc -eq 2 ]] && { die_soft "gre${ID}.service already exists."; return 0; }
+  [[ $rc -ne 0 ]] && { die_soft "Failed creating GRE service."; return 0; }
 
-  add_log "Reloading & Starting Systemd..."
+  add_log "Reloading systemd..."
   systemd_reload
+
+  add_log "Starting gre${ID}.service ..."
   enable_now "gre${ID}.service"
 
+  apply_rpfilter_relax
+
   render
-  echo -e "${GREEN}✔ IRAN LOCAL SETUP COMPLETE!${NC}"
+  echo "${C_BOLD}GRE IPs:${C_RESET}"
+  echo "  IRAN  : ${local_gre_ip}"
+  echo "  KHAREJ: ${peer_gre_ip}"
   echo
-  echo "GRE IPs:"
-  echo -e "  Local (IRAN) : ${CYAN}${local_gre_ip}${NC}"
-  echo -e "  Remote       : ${CYAN}${peer_gre_ip}${NC}"
+  echo "${C_BOLD}Status:${C_RESET}"
+  show_unit_status_brief "gre${ID}.service"
   echo
-  echo -e "${YELLOW}NOTE:${NC} Ports are NOT forwarded yet."
-  echo "Go to 'Add Tunnel Port' in the main menu to add ports."
+  echo "${C_DIM}Forwarder ها جدا هستن. از منوی Tunnel/Forwarder هر وقت خواستی اضافه کن.${C_RESET}"
   pause_enter
 }
 
-setup_kharej_local() {
+kharej_local_setup() {
   local ID KHAREJIP IRANIP GREBASE
   local use_mtu="n" MTU_VALUE=""
 
-  ask_until_valid "GRE Number (Same as Iran):" is_int ID
-  
-  # New IP Logic
-  ask_ip_interactive "Enter KHAREJ (Local) IP:" KHAREJIP
+  add_log "${C_MAGENTA}Wizard:${C_RESET} KHAREJ Local Setup (فقط GRE)"
+  ask_until_valid "GRE Number (same as IRAN side) :" is_int ID
 
-  ask_until_valid "IRAN (Remote) IP:" valid_ipv4 IRANIP
-  ask_until_valid "GRE IP Range (Same as Iran):" valid_gre_base GREBASE
+  ask_local_ip_smooth "KHAREJ" KHAREJIP
+
+  ask_until_valid "IRAN IP (remote) :" valid_ipv4 IRANIP
+  ask_until_valid "GRE IP RANGE base (Example: 10.80.70.0) :" valid_gre_base GREBASE
 
   while true; do
     render
-    echo -e "${GREEN}?? ${NC}Set Custom MTU?"
-    read -r -p "   (y/n) > " use_mtu
+    read -r -p "set custom MTU? (y/n): " use_mtu
     use_mtu="$(trim "$use_mtu")"
     case "${use_mtu,,}" in
-      y|yes) ask_until_valid "Custom MTU (576-1600):" valid_mtu MTU_VALUE; break ;;
-      n|no|"") MTU_VALUE=""; break ;;
-      *) add_log "Please enter y or n." ;;
+      y|yes)
+        ask_until_valid "custom MTU for GRE (576-1600):" valid_mtu MTU_VALUE
+        break
+        ;;
+      n|no|"")
+        MTU_VALUE=""
+        break
+        ;;
+      *)
+        add_log "Invalid input. Please enter y or n."
+        ;;
     esac
   done
 
@@ -445,37 +526,41 @@ setup_kharej_local() {
   local local_gre_ip peer_gre_ip
   local_gre_ip="$(ipv4_set_last_octet "$GREBASE" 2)"
   peer_gre_ip="$(ipv4_set_last_octet "$GREBASE" 1)"
+  add_log "KEY=${key} | KHAREJ(GRE)=${local_gre_ip} | IRAN(GRE)=${peer_gre_ip}"
 
-  ensure_packages || { die_soft "Install failed."; return 0; }
+  ensure_iproute_only || { die_soft "Package installation failed (iproute2)."; return 0; }
 
   make_gre_service "$ID" "$KHAREJIP" "$IRANIP" "$local_gre_ip" "$key" "$MTU_VALUE"
   local rc=$?
-  [[ $rc -eq 2 ]] && { die_soft "Service already exists!"; return 0; }
-  [[ $rc -ne 0 ]] && { die_soft "Failed creating GRE file."; return 0; }
+  [[ $rc -eq 2 ]] && { die_soft "gre${ID}.service already exists."; return 0; }
+  [[ $rc -ne 0 ]] && { die_soft "Failed creating GRE service."; return 0; }
 
-  add_log "Reloading & Starting..."
+  add_log "Reloading systemd..."
   systemd_reload
+
+  add_log "Starting gre${ID}.service ..."
   enable_now "gre${ID}.service"
 
+  apply_rpfilter_relax
+
   render
-  echo -e "${GREEN}✔ KHAREJ LOCAL SETUP COMPLETE!${NC}"
+  echo "${C_BOLD}GRE IPs:${C_RESET}"
+  echo "  KHAREJ: ${local_gre_ip}"
+  echo "  IRAN  : ${peer_gre_ip}"
   echo
-  echo "GRE IPs:"
-  echo -e "  Local (KHAREJ): ${CYAN}${local_gre_ip}${NC}"
-  echo -e "  Remote        : ${CYAN}${peer_gre_ip}${NC}"
+  echo "${C_BOLD}Status:${C_RESET}"
+  show_unit_status_brief "gre${ID}.service"
   pause_enter
 }
 
-# --- TUNNEL / PORT LOGIC ---
-
+# ----------------------------- Tunnel / Forwarder (separate) ------------------------------
 get_gre_ids() {
   local ids=()
-  # From memory
+
   while IFS= read -r u; do
     [[ "$u" =~ ^gre([0-9]+)\.service$ ]] && ids+=("${BASH_REMATCH[1]}")
   done < <(systemctl list-unit-files --no-legend 2>/dev/null | awk '{print $1}' | grep -E '^gre[0-9]+\.service$' || true)
-  
-  # From file (backup)
+
   while IFS= read -r f; do
     f="$(basename "$f")"
     [[ "$f" =~ ^gre([0-9]+)\.service$ ]] && ids+=("${BASH_REMATCH[1]}")
@@ -484,80 +569,22 @@ get_gre_ids() {
   printf "%s\n" "${ids[@]}" | awk 'NF{a[$0]=1} END{for(k in a) print k}' | sort -n
 }
 
-get_gre_cidr() {
+get_all_fw_units() {
+  find /etc/systemd/system -maxdepth 1 -type f -name "fw-gre*-*.service" 2>/dev/null \
+    | awk -F/ '{print $NF}' \
+    | grep -E '^fw-gre[0-9]+-[0-9]+\.service$' \
+    | sort -V || true
+}
+
+get_fw_units_for_id() {
   local id="$1"
-  ip -4 addr show dev "gre${id}" 2>/dev/null | awk '/inet /{print $2}' | head -n1
+  find /etc/systemd/system -maxdepth 1 -type f -name "fw-gre${id}-*.service" 2>/dev/null \
+    | awk -F/ '{print $NF}' \
+    | grep -E "^fw-gre${id}-[0-9]+\.service$" \
+    | sort -V || true
 }
 
-gre_target_ip_from_cidr() {
-  local cidr="$1"
-  local ip mask
-  ip="${cidr%/*}"
-  mask="${cidr#*/}"
-  valid_ipv4 "$ip" || return 1
-  [[ "$mask" == "30" ]] || return 2
-  IFS='.' read -r a b c d <<<"$ip"
-  local base_last=$(( d & 252 ))
-  local target_last=$(( base_last + 2 ))
-  ((target_last>=0 && target_last<=255)) || return 3
-  echo "${a}.${b}.${c}.${target_last}"
-}
-
-add_tunnel_port() {
-  local -a PORT_LIST=()
-  local id cidr target_ip
-
-  mapfile -t GRE_IDS < <(get_gre_ids)
-  local -a GRE_LABELS=()
-  local gid
-  for gid in "${GRE_IDS[@]}"; do
-    GRE_LABELS+=("GRE Tunnel #${gid}")
-  done
-
-  if ! menu_select_index "Add Tunnel Ports" "Select Tunnel to add ports to:" "${GRE_LABELS[@]}"; then
-    return 0
-  fi
-
-  local idx="$MENU_SELECTED"
-  id="${GRE_IDS[$idx]}"
-  add_log "Selected GRE${id}"
-
-  ask_ports # Fills PORT_LIST
-
-  add_log "Detecting Tunnel IPs..."
-  cidr="$(get_gre_cidr "$id")"
-  if [[ -z "$cidr" ]]; then
-    die_soft "Cannot detect IP on gre${id}. Is the tunnel UP? (Check Service Management)"
-    return 0
-  fi
-  
-  target_ip="$(gre_target_ip_from_cidr "$cidr")"
-  if [[ -z "$target_ip" ]]; then
-     die_soft "Could not calculate destination IP from $cidr"
-     return 0
-  fi
-
-  add_log "Traffic will go to -> $target_ip"
-
-  local p
-  for p in "${PORT_LIST[@]}"; do
-    make_fw_service "$id" "$p" "$target_ip"
-  done
-
-  systemd_reload
-  for p in "${PORT_LIST[@]}"; do
-    enable_now "fw-gre${id}-${p}.service"
-  done
-
-  render
-  echo -e "${GREEN}✔ Tunnel Ports Added!${NC}"
-  echo
-  echo -e "Forwarding ${BOLD}${PORT_LIST[*]}${NC} -> ${target_ip}"
-  pause_enter
-}
-
-# --- UTILS FOR MENUS ---
-
+MENU_SELECTED=-1
 menu_select_index() {
   local title="$1"
   local prompt="$2"
@@ -567,22 +594,22 @@ menu_select_index() {
 
   while true; do
     render
-    echo -e "${CYAN}:: $title ::${NC}"
+    echo "${C_BOLD}$title${C_RESET}"
     echo
 
     if ((${#items[@]} == 0)); then
-      echo "No active services found."
+      echo "No service found."
       echo
-      read -r -p "Press ENTER..." _
+      read -r -p "Press ENTER to go back..." _
       MENU_SELECTED=-1
       return 1
     fi
 
     local i
     for ((i=0; i<${#items[@]}; i++)); do
-      echo -e "${BOLD}$((i+1)))${NC} ${items[$i]}"
+      printf "%d) %s\n" $((i+1)) "${items[$i]}"
     done
-    echo -e "${BOLD}0)${NC} Back"
+    echo "0) Back"
     echo
 
     read -r -e -p "$prompt " choice
@@ -597,175 +624,449 @@ menu_select_index() {
       MENU_SELECTED=$((choice-1))
       return 0
     fi
-    add_log "Invalid number."
+
+    add_log "Invalid selection: $choice"
   done
 }
 
-# --- CLEANUP & OTHER FEATURES (Kept mostly logic, improved flow) ---
+get_gre_cidr() {
+  local id="$1"
+  ip -4 addr show dev "gre${id}" 2>/dev/null | awk '/inet /{print $2}' | head -n1
+}
+
+gre_target_ip_from_cidr() {
+  local cidr="$1"
+  local ip mask
+  ip="${cidr%/*}"
+  mask="${cidr#*/}"
+
+  valid_ipv4 "$ip" || return 1
+  [[ "$mask" == "30" ]] || return 2
+
+  IFS='.' read -r a b c d <<<"$ip"
+  local base_last=$(( d & 252 ))
+  local target_last=$(( base_last + 2 ))
+  ((target_last>=0 && target_last<=255)) || return 3
+
+  echo "${a}.${b}.${c}.${target_last}"
+  return 0
+}
+
+tunnel_forwarder_add_ports() {
+  local -a PORT_LIST=()
+  local id cidr target_ip
+
+  ensure_packages || { die_soft "Package installation failed (iproute2/socat/curl)."; return 0; }
+
+  mapfile -t GRE_IDS < <(get_gre_ids)
+  local -a GRE_LABELS=()
+  local gid
+  for gid in "${GRE_IDS[@]}"; do GRE_LABELS+=("GRE${gid}"); done
+
+  if ! menu_select_index "Tunnel / Forwarder" "Select GRE:" "${GRE_LABELS[@]}"; then
+    return 0
+  fi
+
+  id="${GRE_IDS[$MENU_SELECTED]}"
+  add_log "Selected: GRE${id}"
+
+  ask_ports
+
+  cidr="$(get_gre_cidr "$id")"
+  if [[ -z "$cidr" ]]; then
+    die_soft "Cannot detect inet on gre${id}. Is gre${id} UP?"
+    return 0
+  fi
+  add_log "Detected gre${id} inet: ${cidr}"
+
+  target_ip="$(gre_target_ip_from_cidr "$cidr")"
+  local rc=$?
+  if [[ $rc -eq 2 ]]; then
+    die_soft "gre${id} mask is not /30 (found: ${cidr})."
+    return 0
+  elif [[ $rc -ne 0 || -z "$target_ip" ]]; then
+    die_soft "Failed to compute target IP from: ${cidr}"
+    return 0
+  fi
+
+  add_log "Target IP for forwarders: ${C_CYAN}${target_ip}${C_RESET}"
+  add_log "Creating forwarders..."
+  local p
+  for p in "${PORT_LIST[@]}"; do
+    make_fw_service "$id" "$p" "$target_ip"
+  done
+
+  add_log "Reloading systemd..."
+  systemd_reload
+
+  add_log "Enable & Start forwarders..."
+  for p in "${PORT_LIST[@]}"; do
+    enable_now "fw-gre${id}-${p}.service"
+  done
+
+  render
+  echo "${C_BOLD}GRE${id}:${C_RESET}"
+  echo "  inet   : ${cidr}"
+  echo "  target : ${target_ip}"
+  echo
+  echo "${C_BOLD}Forwarder status:${C_RESET}"
+  for p in "${PORT_LIST[@]}"; do
+    echo
+    show_unit_status_brief "fw-gre${id}-${p}.service"
+  done
+  pause_enter
+}
+
+# ----------------------------- Services Management (kept) ------------------------------
+service_action_menu() {
+  local unit="$1"
+  local action=""
+
+  while true; do
+    render
+    echo "Selected: ${C_BOLD}$unit${C_RESET}"
+    echo
+    echo "1) Enable & Start"
+    echo "2) Restart"
+    echo "3) Stop & Disable"
+    echo "4) Status"
+    echo "0) Back"
+    echo
+
+    read -r -e -p "Select action: " action
+    action="$(trim "$action")"
+
+    case "$action" in
+      1)
+        add_log "Enable & Start: $unit"
+        systemctl enable "$unit" >/dev/null 2>&1 && add_log "Enabled: $unit" || add_log "Enable failed: $unit"
+        systemctl start "$unit"  >/dev/null 2>&1 && add_log "Started: $unit" || add_log "Start failed: $unit"
+        ;;
+      2)
+        add_log "Restart: $unit"
+        systemctl restart "$unit" >/dev/null 2>&1 && add_log "Restarted: $unit" || add_log "Restart failed: $unit"
+        ;;
+      3)
+        add_log "Stop & Disable: $unit"
+        systemctl stop "$unit"    >/dev/null 2>&1 && add_log "Stopped: $unit" || add_log "Stop failed: $unit"
+        systemctl disable "$unit" >/dev/null 2>&1 && add_log "Disabled: $unit" || add_log "Disable failed: $unit"
+        ;;
+      4)
+        render
+        echo "---- STATUS ($unit) ----"
+        systemctl --no-pager --full status "$unit" 2>&1 | sed -n '1,16p'
+        echo "------------------------"
+        pause_enter
+        ;;
+      0) return 0 ;;
+      *) add_log "Invalid action: $action" ;;
+    esac
+  done
+}
+
+services_management() {
+  local sel=""
+
+  while true; do
+    render
+    echo "${C_BOLD}Services Management${C_RESET}"
+    echo
+    echo "1) GRE services"
+    echo "2) Forwarder services"
+    echo "0) Back"
+    echo
+    read -r -e -p "Select: " sel
+    sel="$(trim "$sel")"
+
+    case "$sel" in
+      1)
+        mapfile -t GRE_IDS < <(get_gre_ids)
+        local -a GRE_LABELS=()
+        local id
+        for id in "${GRE_IDS[@]}"; do GRE_LABELS+=("GRE${id}"); done
+
+        if menu_select_index "GRE Services" "Select GRE:" "${GRE_LABELS[@]}"; then
+          local idx="$MENU_SELECTED"
+          id="${GRE_IDS[$idx]}"
+          add_log "GRE selected: GRE${id}"
+          service_action_menu "gre${id}.service"
+        fi
+        ;;
+
+      2)
+        mapfile -t FW_UNITS < <(get_all_fw_units)
+        local -a FW_LABELS=()
+        local u gid port
+
+        for u in "${FW_UNITS[@]}"; do
+          if [[ "$u" =~ ^fw-gre([0-9]+)-([0-9]+)\.service$ ]]; then
+            gid="${BASH_REMATCH[1]}"
+            port="${BASH_REMATCH[2]}"
+            FW_LABELS+=("GRE${gid}:${port}")
+          else
+            FW_LABELS+=("${u%.service}")
+          fi
+        done
+
+        if menu_select_index "Forwarder Services" "Select Forwarder:" "${FW_LABELS[@]}"; then
+          local fidx="$MENU_SELECTED"
+          u="${FW_UNITS[$fidx]}"
+          add_log "Forwarder selected: ${FW_LABELS[$fidx]}"
+          service_action_menu "$u"
+        fi
+        ;;
+
+      0) return 0 ;;
+      *) add_log "Invalid selection: $sel" ;;
+    esac
+  done
+}
+
+# ----------------------------- Uninstall (kept, minimal) ------------------------------
+automation_backup_dir() { echo "/root/gre-backup"; }
+automation_script_path() { local id="$1"; echo "/usr/local/bin/sepehr-recreate-gre${id}.sh"; }
+automation_log_path() { local id="$1"; echo "/var/log/sepehr-gre${id}.log"; }
+
+remove_gre_automation_cron() {
+  local id="$1"
+  local script
+  script="$(automation_script_path "$id")"
+
+  crontab -l >/dev/null 2>&1 || return 0
+  local tmp
+  tmp="$(mktemp)"
+  crontab -l 2>/dev/null | grep -vF "$script" > "$tmp" || true
+  crontab "$tmp" 2>/dev/null || true
+  rm -f "$tmp" >/dev/null 2>&1 || true
+}
+
+remove_gre_automation_backups() {
+  local id="$1"
+  local bakdir
+  bakdir="$(automation_backup_dir)"
+
+  [[ -d "$bakdir" ]] || { add_log "Backup dir not found: $bakdir"; return 0; }
+
+  local removed_any=0
+
+  if [[ -f "$bakdir/gre${id}.service" ]]; then
+    rm -f "$bakdir/gre${id}.service" >/dev/null 2>&1 || true
+    add_log "Removed backup: $bakdir/gre${id}.service"
+    removed_any=1
+  fi
+
+  local fw
+  shopt -s nullglob
+  for fw in "$bakdir"/fw-gre${id}-*.service; do
+    rm -f "$fw" >/dev/null 2>&1 || true
+    add_log "Removed backup: $fw"
+    removed_any=1
+  done
+  shopt -u nullglob
+
+  [[ $removed_any -eq 0 ]] && add_log "No backup files found for GRE${id}."
+}
 
 uninstall_clean() {
   mapfile -t GRE_IDS < <(get_gre_ids)
   local -a GRE_LABELS=()
-  for id in "${GRE_IDS[@]}"; do GRE_LABELS+=("GRE Tunnel #${id}"); done
+  local id
+  for id in "${GRE_IDS[@]}"; do GRE_LABELS+=("GRE${id}"); done
 
-  if ! menu_select_index "Uninstall" "Select Tunnel to DELETE:" "${GRE_LABELS[@]}"; then return 0; fi
-
-  local id="${GRE_IDS[$MENU_SELECTED]}"
-  
-  render
-  echo -e "${RED}${BOLD}WARNING: DELETING GRE #${id}${NC}"
-  echo "This will delete the tunnel interface and all associated port forwarders."
-  echo
-  read -r -p "Type 'YES' to confirm: " confirm
-  if [[ "$confirm" != "YES" ]]; then
-    add_log "Deletion Cancelled."
+  if ! menu_select_index "Uninstall & Clean" "Select GRE to uninstall:" "${GRE_LABELS[@]}"; then
     return 0
   fi
 
-  add_log "Stopping services..."
-  systemctl stop "gre${id}.service" 2>/dev/null
-  systemctl disable "gre${id}.service" 2>/dev/null
-  
-  # Find and stop forwarders
-  find /etc/systemd/system -name "fw-gre${id}-*.service" | while read -r f; do
-     systemctl stop "$(basename "$f")" 2>/dev/null
-     systemctl disable "$(basename "$f")" 2>/dev/null
-     rm -f "$f"
-     add_log "Removed Forwarder: $(basename "$f")"
+  local idx="$MENU_SELECTED"
+  id="${GRE_IDS[$idx]}"
+
+  while true; do
+    render
+    echo "${C_BOLD}Uninstall & Clean${C_RESET}"
+    echo
+    echo "Target: ${C_RED}GRE${id}${C_RESET}"
+    echo "This will remove:"
+    echo "  - /etc/systemd/system/gre${id}.service"
+    echo "  - /etc/systemd/system/fw-gre${id}-*.service"
+    echo "  - cron + /usr/local/bin/sepehr-recreate-gre${id}.sh (if exists)"
+    echo "  - /var/log/sepehr-gre${id}.log (if exists)"
+    echo "  - /root/gre-backup/* (if exists)"
+    echo
+    echo "Type: YES (confirm)  or  NO (cancel)"
+    echo
+    local confirm=""
+    read -r -e -p "Confirm: " confirm
+    confirm="$(trim "$confirm")"
+
+    if [[ "${confirm^^}" == "NO" ]]; then
+      add_log "Uninstall cancelled for GRE${id}"
+      return 0
+    fi
+    if [[ "${confirm^^}" == "YES" ]]; then
+      break
+    fi
+    add_log "Please type YES or NO."
   done
 
-  rm -f "/etc/systemd/system/gre${id}.service"
-  systemctl daemon-reload
-  systemctl reset-failed
-  
-  # Cleanup Automation files
-  rm -f "/usr/local/bin/sepehr-recreate-gre${id}.sh"
-  rm -f "/var/log/sepehr-gre${id}.log"
-  # Clean backups if any
-  rm -f "/root/gre-backup/gre${id}.service"
-  rm -f /root/gre-backup/fw-gre${id}-*.service
+  add_log "Stopping/Disabling gre${id}.service"
+  systemctl stop "gre${id}.service" >/dev/null 2>&1 || true
+  systemctl disable "gre${id}.service" >/dev/null 2>&1 || true
 
-  add_log "Cleaned up GRE #${id}."
+  mapfile -t FW_UNITS < <(get_fw_units_for_id "$id")
+  if ((${#FW_UNITS[@]} > 0)); then
+    local u
+    for u in "${FW_UNITS[@]}"; do
+      add_log "Stopping/Disabling $u"
+      systemctl stop "$u" >/dev/null 2>&1 || true
+      systemctl disable "$u" >/dev/null 2>&1 || true
+    done
+  else
+    add_log "No forwarders found for GRE${id}"
+  fi
+
+  add_log "Removing unit files..."
+  rm -f "/etc/systemd/system/gre${id}.service" >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/fw-gre${id}-*.service >/dev/null 2>&1 || true
+
+  add_log "Reloading systemd..."
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed  >/dev/null 2>&1 || true
+
+  add_log "Removing automation (cron/script/log/backup)..."
+  remove_gre_automation_cron "$id"
+  local a_script a_log
+  a_script="$(automation_script_path "$id")"
+  a_log="$(automation_log_path "$id")"
+  [[ -f "$a_script" ]] && rm -f "$a_script" >/dev/null 2>&1 || true
+  [[ -f "$a_log" ]] && rm -f "$a_log" >/dev/null 2>&1 || true
+  remove_gre_automation_backups "$id"
+
+  add_log "${C_GREEN}Uninstall completed for GRE${id}${C_RESET}"
+  render
   pause_enter
 }
 
-# --- MAIN MENU ---
+# ----------------------------- MTU change (kept) ------------------------------
+change_mtu() {
+  local id mtu
 
-main_menu() {
+  mapfile -t GRE_IDS < <(get_gre_ids)
+  local -a GRE_LABELS=()
+  for id in "${GRE_IDS[@]}"; do GRE_LABELS+=("GRE${id}"); done
+
+  if ! menu_select_index "Change MTU" "Select GRE:" "${GRE_LABELS[@]}"; then
+    return 0
+  fi
+  id="${GRE_IDS[$MENU_SELECTED]}"
+
+  ask_until_valid "New MTU for gre (576-1600):" valid_mtu mtu
+
+  add_log "Setting MTU on interface gre${id} to ${mtu}..."
+  render
+  ip link set "gre${id}" mtu "$mtu" >/dev/null 2>&1 || add_log "WARNING: gre${id} interface not found/up (will still patch unit)."
+
+  local unit="/etc/systemd/system/gre${id}.service"
+  local backup="/root/gre-backup/gre${id}.service"
+
+  add_log "Patching unit file: $unit"
+  render
+  if [[ -f "$unit" ]]; then
+    ensure_mtu_line_in_unit "$id" "$mtu" "$unit"
+  else
+    die_soft "Unit file not found: $unit"
+    return 0
+  fi
+
+  if [[ -f "$backup" ]]; then
+    add_log "Patching backup unit: $backup"
+    render
+    ensure_mtu_line_in_unit "$id" "$mtu" "$backup"
+  else
+    add_log "No backup unit found (skip): $backup"
+  fi
+
+  add_log "Reloading systemd..."
+  systemd_reload
+
+  add_log "Restarting gre${id}.service..."
+  systemctl restart "gre${id}.service" >/dev/null 2>&1 || add_log "WARNING: restart failed for gre${id}.service"
+
+  add_log "${C_GREEN}Done:${C_RESET} GRE${id} MTU changed to ${mtu}"
+  render
+  pause_enter
+}
+
+# ----------------------------- Main Menu (Smooth separation) ------------------------------
+local_setup_menu() {
   local choice=""
   while true; do
     render
-    echo -e "${BOLD}1 >${NC} ${GREEN}Setup IRAN Local${NC}   (Create Interface Only)"
-    echo -e "${BOLD}2 >${NC} ${GREEN}Setup KHAREJ Local${NC} (Create Interface Only)"
-    echo -e "${BOLD}3 >${NC} ${YELLOW}Add Tunnel Port${NC}    (Forwarding / Ports)"
-    echo "------------------------------------------------"
-    echo -e "4 > Services Management (Start/Stop/Status)"
-    echo -e "5 > Uninstall & Clean"
-    echo "------------------------------------------------"
-    echo -e "6 > Change MTU"
-    echo -e "0 > Exit"
+    echo "${C_BOLD}Local Setup (فقط GRE)${C_RESET}"
+    echo
+    echo "1) Setup IRAN local (GRE only)"
+    echo "2) Setup KHAREJ local (GRE only)"
+    echo "0) Back"
     echo
     read -r -e -p "Select option: " choice
     choice="$(trim "$choice")"
 
     case "$choice" in
-      1) setup_iran_local ;;
-      2) setup_kharej_local ;;
-      3) add_tunnel_port ;;
-      4) services_management ;; # Assumed exists or reuse old logic if needed, but for brevity using placeholder or removed if not provided in full update. I will re-inject the Service Management Function below.
-      5) uninstall_clean ;;
-      6) change_mtu ;;
-      0) exit 0 ;;
-      *) add_log "Invalid option." ;;
+      1) add_log "Selected: IRAN local setup"; iran_local_setup ;;
+      2) add_log "Selected: KHAREJ local setup"; kharej_local_setup ;;
+      0) return 0 ;;
+      *) add_log "Invalid option: $choice" ;;
     esac
   done
 }
 
-# --- MISSING FUNCTIONS RE-INJECTED (From original logic but cleaned) ---
-
-ensure_mtu_line_in_unit() {
-  local id="$1" mtu="$2" file="$3"
-  [[ -f "$file" ]] || return 0
-  if grep -qE "^ExecStart=/sbin/ip link set gre${id} mtu" "$file"; then
-    sed -i.bak -E "s|^ExecStart=/sbin/ip link set gre${id} mtu.*|ExecStart=/sbin/ip link set gre${id} mtu ${mtu}|" "$file"
-  elif grep -qE "^ExecStart=/sbin/ip link set gre${id} up$" "$file"; then
-    sed -i.bak -E "s|^ExecStart=/sbin/ip link set gre${id} up$|ExecStart=/sbin/ip link set gre${id} mtu ${mtu}\nExecStart=/sbin/ip link set gre${id} up|" "$file"
-  else
-    printf "\nExecStart=/sbin/ip link set gre%s mtu %s\n" "$id" "$mtu" >> "$file"
-  fi
-}
-
-change_mtu() {
-  mapfile -t GRE_IDS < <(get_gre_ids)
-  local -a GRE_LABELS=()
-  for id in "${GRE_IDS[@]}"; do GRE_LABELS+=("GRE Tunnel #${id}"); done
-  if ! menu_select_index "Change MTU" "Select Tunnel:" "${GRE_LABELS[@]}"; then return 0; fi
-  local id="${GRE_IDS[$MENU_SELECTED]}"
-  
-  local mtu
-  ask_until_valid "New MTU (576-1600):" valid_mtu mtu
-  
-  ip link set "gre${id}" mtu "$mtu" 2>/dev/null
-  ensure_mtu_line_in_unit "$id" "$mtu" "/etc/systemd/system/gre${id}.service"
-  systemd_reload
-  add_log "MTU Updated to $mtu"
-  pause_enter
-}
-
-service_action_menu() {
-  local unit="$1"
-  local action=""
+tunnel_menu() {
+  local choice=""
   while true; do
     render
-    echo -e "Unit: ${CYAN}$unit${NC}"
+    echo "${C_BOLD}Tunnel / Forwarder (جدا از Local)${C_RESET}"
     echo
-    echo "1) Start & Enable"
-    echo "2) Restart"
-    echo "3) Stop & Disable"
-    echo "4) Show Logs/Status"
+    echo "1) Add/Install Forwarder ports for an existing GRE"
     echo "0) Back"
     echo
-    read -r -p "Action: " action
-    case "$action" in
-      1) systemctl enable --now "$unit" && add_log "Started.";;
-      2) systemctl restart "$unit" && add_log "Restarted.";;
-      3) systemctl disable --now "$unit" && add_log "Stopped.";;
-      4) systemctl status "$unit" | cat; read -p "Enter..." _ ;;
+    read -r -e -p "Select option: " choice
+    choice="$(trim "$choice")"
+
+    case "$choice" in
+      1) add_log "Selected: Add forwarder ports"; tunnel_forwarder_add_ports ;;
       0) return 0 ;;
+      *) add_log "Invalid option: $choice" ;;
     esac
   done
 }
 
-get_all_fw_units() {
-  find /etc/systemd/system -maxdepth 1 -type f -name "fw-gre*-*.service" 2>/dev/null | awk -F/ '{print $NF}' | sort -V
-}
-
-services_management() {
-  local sel=""
+main_menu() {
+  local choice=""
   while true; do
     render
-    echo "1) Manage Tunnels (GRE Interfaces)"
-    echo "2) Manage Forwarders (Ports)"
-    echo "0) Back"
-    read -r -p "Select: " sel
-    case "$sel" in
-      1)
-        mapfile -t GRE_IDS < <(get_gre_ids)
-        local -a L=(); for i in "${GRE_IDS[@]}"; do L+=("GRE #$i"); done
-        if menu_select_index "Tunnels" "Select:" "${L[@]}"; then
-             service_action_menu "gre${GRE_IDS[$MENU_SELECTED]}.service"
-        fi
-        ;;
-      2)
-        mapfile -t FWS < <(get_all_fw_units)
-        if menu_select_index "Forwarders" "Select:" "${FWS[@]}"; then
-             service_action_menu "${FWS[$MENU_SELECTED]}"
-        fi
-        ;;
-      0) return 0 ;;
+    echo "${C_BOLD}Main Menu${C_RESET}"
+    echo
+    echo "1) Local Setup (IRAN / KHAREJ)  [GRE only]"
+    echo "2) Tunnel / Forwarder           [ports later]"
+    echo "3) Services Management"
+    echo "4) Uninstall & Clean"
+    echo "5) Change MTU"
+    echo "0) Exit"
+    echo
+    read -r -e -p "Select option: " choice
+    choice="$(trim "$choice")"
+
+    case "$choice" in
+      1) add_log "Open: Local Setup"; local_setup_menu ;;
+      2) add_log "Open: Tunnel/Forwarder"; tunnel_menu ;;
+      3) add_log "Open: Services Management"; services_management ;;
+      4) add_log "Selected: Uninstall & Clean"; uninstall_clean ;;
+      5) add_log "Selected: Change MTU"; change_mtu ;;
+      0) add_log "Bye!"; render; exit 0 ;;
+      *) add_log "Invalid option: $choice" ;;
     esac
   done
 }
 
 ensure_root "$@"
+add_log "TEEjAY started. GRE/Forwarder manager loaded."
 main_menu
