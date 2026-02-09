@@ -1,466 +1,276 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
 
-APP="teejay-local"
-BASE_DIR="/etc/teejay-local"
-WG_IF="wg0"
-WG_CONF="/etc/wireguard/${WG_IF}.conf"
-WATCH_SCRIPT="/usr/local/bin/teejay-watchdog.sh"
-SYSTEMD_SERVICE="/etc/systemd/system/teejay-watchdog.service"
-SYSTEMD_TIMER="/etc/systemd/system/teejay-watchdog.timer"
-CRON_FILE="/etc/cron.d/teejay-watchdog"
+# ==========================================
+#  Teejay Tunnel Script + Auto Healing
+#  Simple GRE Tunnel with Ping Watchdog
+# ==========================================
 
-# ---------------- UI ----------------
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+CONFIG_DIR="/etc/teejay-tunnel"
+CONFIG_FILE="$CONFIG_DIR/config"
+WATCHDOG_FILE="$CONFIG_DIR/watchdog.sh"
+LOG_FILE="/var/log/teejay-tunnel.log"
+TUNNEL_NAME="tj-tun0"
+
+mkdir -p "$CONFIG_DIR"
+
+# --- Helper Functions ---
+
 logo() {
-  clear || true
-  cat <<'EOF'
-████████╗███████╗███████╗     ██╗ █████╗ ██╗   ██╗
-╚══██╔══╝██╔════╝██╔════╝     ██║██╔══██╗╚██╗ ██╔╝
-   ██║   █████╗  █████╗       ██║███████║ ╚████╔╝ 
-   ██║   ██╔══╝  ██╔══╝  ██   ██║██╔══██║  ╚██╔╝  
-   ██║   ███████╗███████╗╚█████╔╝██║  ██║   ██║   
-   ╚═╝   ╚══════╝╚══════╝ ╚════╝ ╚═╝  ╚═╝   ╚═╝   
-
-                Teejay Local Tunnel Manager
-EOF
-  echo
+    clear
+    echo -e "${CYAN}"
+    echo "  _______           _             "
+    echo " |__   __|         (_)            "
+    echo "    | | ___  ___    _  __ _ _   _ "
+    echo "    | |/ _ \/ _ \  | |/ _\` | | | |"
+    echo "    | |  __/  __/  | | (_| | |_| |"
+    echo "    |_|\___|\___|  | |\__,_|\__, |"
+    echo "                  _/ |       __/ |"
+    echo "                 |__/       |___/ "
+    echo -e "${NC}"
+    echo -e "  ${YELLOW}Stable Local IP Tunnel Generator${NC}"
+    echo -e "  ${YELLOW}Powered by Teejay Automation${NC}"
+    echo "------------------------------------------------"
 }
 
-pause() { read -r -p "Enter بزن برای ادامه..." _; }
-
-die() { echo "❌ $*" >&2; exit 1; }
-
-need_root() {
-  [[ ${EUID:-$(id -u)} -eq 0 ]] || die "این اسکریپت باید با root اجرا بشه."
-}
-
-have_cmd() { command -v "$1" >/dev/null 2>&1; }
-
-detect_src_ip() {
-  # Best-effort "server IP" (source IP used to reach internet)
-  ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}' || true
-}
-
-read_yesno() {
-  local prompt="$1"
-  local ans
-  while true; do
-    read -r -p "$prompt [Y/N]: " ans
-    case "${ans,,}" in
-      y|yes) echo "Y"; return ;;
-      n|no)  echo "N"; return ;;
-      *) echo "فقط Y یا N" ;;
-    esac
-  done
-}
-
-ensure_dirs() {
-  mkdir -p "$BASE_DIR"
-  chmod 700 "$BASE_DIR"
-}
-
-install_wireguard() {
-  if have_cmd wg && have_cmd wg-quick; then
-    return
-  fi
-  echo "🔧 نصب WireGuard ..."
-  if have_cmd apt-get; then
-    apt-get update -y
-    apt-get install -y wireguard wireguard-tools iproute2 iputils-ping
-  elif have_cmd yum; then
-    yum install -y epel-release || true
-    yum install -y wireguard-tools iproute iputils
-  elif have_cmd dnf; then
-    dnf install -y wireguard-tools iproute iputils
-  else
-    die "پکیج منیجر شناخته نشد. دستی wireguard-tools نصب کن."
-  fi
-}
-
-gen_keys_if_missing() {
-  local priv="$BASE_DIR/privatekey"
-  local pub="$BASE_DIR/publickey"
-  if [[ ! -f "$priv" || ! -f "$pub" ]]; then
-    umask 077
-    wg genkey | tee "$priv" | wg pubkey > "$pub"
-  fi
-  chmod 600 "$priv" "$pub"
-}
-
-show_pubkey() {
-  echo "🔑 PublicKey این سرور:"
-  cat "$BASE_DIR/publickey"
-  echo
-}
-
-write_sysctl_forwarding() {
-  # Not strictly required for ping between tunnel IPs, but safe for routing later
-  cat >/etc/sysctl.d/99-teejay-local.conf <<EOF
-net.ipv4.ip_forward=1
-EOF
-  sysctl -q --system || true
-}
-
-stop_existing_wg() {
-  if systemctl is-active --quiet "wg-quick@${WG_IF}.service" 2>/dev/null; then
-    systemctl stop "wg-quick@${WG_IF}.service" || true
-  fi
-  if [[ -f "$WG_CONF" ]]; then
-    wg-quick down "$WG_IF" >/dev/null 2>&1 || true
-  fi
-}
-
-apply_wg_conf() {
-  chmod 600 "$WG_CONF"
-  systemctl enable "wg-quick@${WG_IF}.service" >/dev/null 2>&1 || true
-  systemctl restart "wg-quick@${WG_IF}.service"
-}
-
-ping_check() {
-  local target="$1"
-  ping -c 2 -W 2 "$target" >/dev/null 2>&1
-}
-
-save_state() {
-  cat >"$BASE_DIR/state.env" <<EOF
-ROLE="$1"
-LOCAL_IP="$2"
-PEER_LOCAL_IP="$3"
-PEER_PUBLIC_IP="$4"
-WG_PORT="$5"
-MTU="$6"
-EOF
-  chmod 600 "$BASE_DIR/state.env"
-}
-
-load_state() {
-  [[ -f "$BASE_DIR/state.env" ]] || die "هیچ تنظیماتی پیدا نشد. اول Setup رو انجام بده."
-  # shellcheck disable=SC1090
-  source "$BASE_DIR/state.env"
-}
-
-setup_common_questions() {
-  local detected ipconfirm pubip
-  detected="$(detect_src_ip)"
-  if [[ -n "${detected:-}" ]]; then
-    echo "IP این سرور: $detected"
-    ipconfirm="$(read_yesno "is this your server ip ?")"
-    if [[ "$ipconfirm" == "Y" ]]; then
-      pubip="$detected"
-    else
-      read -r -p "IP صحیح سرور را دستی وارد کن: " pubip
+get_real_ip() {
+    local ip=""
+    ip=$(curl -s --max-time 3 4.icanhazip.com 2>/dev/null)
+    if [ -z "$ip" ]; then
+        ip=$(hostname -I | awk '{print $1}')
     fi
-  else
-    read -r -p "IP سرور را وارد کن: " pubip
-  fi
-
-  echo "$pubip"
+    echo "$ip"
 }
 
-create_iran_conf() {
-  local my_pubip peer_pubip peer_pubkey mtu port
-  my_pubip="$(setup_common_questions)"
-
-  read -r -p "Kharej IP (Public): " peer_pubip
-  read -r -p "MTU (مثلا 1420 / 1380): " mtu
-  read -r -p "WireGuard Port (پیشنهادی 51820): " port
-  port="${port:-51820}"
-
-  echo
-  echo "الان باید PublicKey سرور خارج رو وارد کنی."
-  read -r -p "Kharej PublicKey: " peer_pubkey
-
-  gen_keys_if_missing
-
-  stop_existing_wg
-
-  cat >"$WG_CONF" <<EOF
-[Interface]
-Address = 10.10.10.1/30
-ListenPort = ${port}
-PrivateKey = $(cat "$BASE_DIR/privatekey")
-MTU = ${mtu}
-
-# Optional: keepalive helps NAT paths
-PostUp = iptables -I INPUT -p udp --dport ${port} -j ACCEPT
-PostDown = iptables -D INPUT -p udp --dport ${port} -j ACCEPT
-
-[Peer]
-PublicKey = ${peer_pubkey}
-AllowedIPs = 10.10.10.2/32
-Endpoint = ${peer_pubip}:${port}
-PersistentKeepalive = 25
-EOF
-
-  write_sysctl_forwarding
-  apply_wg_conf
-
-  save_state "IRAN" "10.10.10.1" "10.10.10.2" "$peer_pubip" "$port" "$mtu"
-
-  echo
-  echo "✅ Iran local setup done."
-  echo "📌 حالا PublicKey این سرور رو بردار بده به سرور خارج:"
-  show_pubkey
-  echo "🔎 تست پینگ به 10.10.10.2 ..."
-  if ping_check "10.10.10.2"; then
-    echo "✅ Ping OK"
-  else
-    echo "⚠️ Ping هنوز OK نیست. اول سمت خارج رو هم ست کن."
-  fi
-}
-
-create_kharej_conf() {
-  local my_pubip peer_pubip peer_pubkey mtu port
-  my_pubip="$(setup_common_questions)"
-
-  read -r -p "Iran IP (Public): " peer_pubip
-  read -r -p "MTU (مثلا 1420 / 1380): " mtu
-  read -r -p "WireGuard Port (پیشنهادی 51820): " port
-  port="${port:-51820}"
-
-  echo
-  echo "الان باید PublicKey سرور ایران رو وارد کنی."
-  read -r -p "Iran PublicKey: " peer_pubkey
-
-  gen_keys_if_missing
-
-  stop_existing_wg
-
-  cat >"$WG_CONF" <<EOF
-[Interface]
-Address = 10.10.10.2/30
-ListenPort = ${port}
-PrivateKey = $(cat "$BASE_DIR/privatekey")
-MTU = ${mtu}
-
-PostUp = iptables -I INPUT -p udp --dport ${port} -j ACCEPT
-PostDown = iptables -D INPUT -p udp --dport ${port} -j ACCEPT
-
-[Peer]
-PublicKey = ${peer_pubkey}
-AllowedIPs = 10.10.10.1/32
-Endpoint = ${peer_pubip}:${port}
-PersistentKeepalive = 25
-EOF
-
-  write_sysctl_forwarding
-  apply_wg_conf
-
-  save_state "KHAREJ" "10.10.10.2" "10.10.10.1" "$peer_pubip" "$port" "$mtu"
-
-  echo
-  echo "✅ Kharej local setup done."
-  echo "📌 PublicKey این سرور رو بردار بده به سرور ایران:"
-  show_pubkey
-  echo "🔎 تست پینگ به 10.10.10.1 ..."
-  if ping_check "10.10.10.1"; then
-    echo "✅ Ping OK"
-  else
-    echo "⚠️ Ping هنوز OK نیست. سمت ایران هم چک کن."
-  fi
-}
-
-install_watchdog_script() {
-  cat >"$WATCH_SCRIPT" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-BASE_DIR="/etc/teejay-local"
-WG_IF="wg0"
-WG_CONF="/etc/wireguard/${WG_IF}.conf"
-LOG="/var/log/teejay-watchdog.log"
-
-log() {
-  echo "[$(date '+%F %T')] $*" | tee -a "$LOG" >/dev/null
-}
-
-ping_ok() {
-  local ip="$1"
-  ping -c 2 -W 2 "$ip" >/dev/null 2>&1
-}
-
-restart_tunnel() {
-  log "Restarting WireGuard..."
-  systemctl restart "wg-quick@${WG_IF}.service" >/dev/null 2>&1 || true
-  sleep 2
-}
-
-main() {
-  [[ -f "$BASE_DIR/state.env" ]] || exit 0
-  # shellcheck disable=SC1090
-  source "$BASE_DIR/state.env"
-
-  # basic sanity
-  [[ -f "$WG_CONF" ]] || { log "No wg conf found."; exit 0; }
-
-  if ping_ok "$PEER_LOCAL_IP"; then
-    exit 0
-  fi
-
-  log "Ping to $PEER_LOCAL_IP failed. Trying recovery..."
-
-  # Try multiple times until ping returns (bounded)
-  for i in {1..6}; do
-    restart_tunnel
-    if ping_ok "$PEER_LOCAL_IP"; then
-      log "Recovered. Ping OK."
-      exit 0
-    fi
-    log "Attempt $i failed. Retrying..."
-    sleep 3
-  done
-
-  log "Recovery failed after retries."
-  exit 0
-}
-
-main "$@"
-EOF
-  chmod +x "$WATCH_SCRIPT"
-}
-
-enable_systemd_timer() {
-  install_watchdog_script
-
-  cat >"$SYSTEMD_SERVICE" <<EOF
-[Unit]
-Description=Teejay WireGuard Watchdog
-
-[Service]
-Type=oneshot
-ExecStart=${WATCH_SCRIPT}
-EOF
-
-  cat >"$SYSTEMD_TIMER" <<EOF
-[Unit]
-Description=Run Teejay Watchdog every 30 seconds
-
-[Timer]
-OnBootSec=30
-OnUnitActiveSec=30
-AccuracySec=1
-
-[Install]
-WantedBy=timers.target
-EOF
-
-  systemctl daemon-reload
-  systemctl enable --now teejay-watchdog.timer
-  systemctl disable --now teejay-watchdog.service >/dev/null 2>&1 || true
-
-  # Ensure no cron duplicate
-  rm -f "$CRON_FILE" >/dev/null 2>&1 || true
-
-  echo "✅ Automation فعال شد (systemd timer هر 30 ثانیه)."
-}
-
-enable_cron_job() {
-  install_watchdog_script
-  cat >"$CRON_FILE" <<EOF
-* * * * * root ${WATCH_SCRIPT} >/dev/null 2>&1
-EOF
-  chmod 644 "$CRON_FILE"
-
-  # Disable systemd timer if exists
-  systemctl disable --now teejay-watchdog.timer >/dev/null 2>&1 || true
-  rm -f "$SYSTEMD_SERVICE" "$SYSTEMD_TIMER" >/dev/null 2>&1 || true
-  systemctl daemon-reload >/dev/null 2>&1 || true
-
-  echo "✅ Automation فعال شد (cron هر 1 دقیقه)."
-}
-
-automation_menu() {
-  echo "1) systemd timer (هر 30 ثانیه) - پیشنهاد"
-  echo "2) cron (هر 1 دقیقه)"
-  echo "3) disable automation"
-  read -r -p "انتخاب: " a
-  case "$a" in
-    1) enable_systemd_timer ;;
-    2) enable_cron_job ;;
-    3)
-      systemctl disable --now teejay-watchdog.timer >/dev/null 2>&1 || true
-      rm -f "$CRON_FILE" "$SYSTEMD_SERVICE" "$SYSTEMD_TIMER" >/dev/null 2>&1 || true
-      systemctl daemon-reload >/dev/null 2>&1 || true
-      echo "✅ Automation غیرفعال شد."
-      ;;
-    *) echo "نامعتبر" ;;
-  esac
-}
-
-status_menu() {
-  if [[ -f "$BASE_DIR/state.env" ]]; then
-    # shellcheck disable=SC1090
-    source "$BASE_DIR/state.env"
-    echo "Role: ${ROLE:-?}"
-    echo "Local IP: ${LOCAL_IP:-?}"
-    echo "Peer Local IP: ${PEER_LOCAL_IP:-?}"
-    echo "Peer Public IP: ${PEER_PUBLIC_IP:-?}"
-    echo "Port: ${WG_PORT:-?}"
-    echo "MTU: ${MTU:-?}"
-    echo
-  else
-    echo "⚠️ هنوز state ذخیره نشده."
-  fi
-
-  echo "=== wg show ==="
-  if have_cmd wg; then
-    wg show "$WG_IF" || true
-  else
-    echo "wg نصب نیست."
-  fi
-  echo
-
-  if [[ -f "$BASE_DIR/state.env" ]]; then
-    echo "=== ping peer local ==="
-    if ping -c 3 -W 2 "$PEER_LOCAL_IP"; then
-      echo "✅ Ping OK"
-    else
-      echo "❌ Ping FAIL"
-    fi
-  fi
-}
-
-uninstall_all() {
-  echo "🧹 Uninstall..."
-  systemctl disable --now "wg-quick@${WG_IF}.service" >/dev/null 2>&1 || true
-  wg-quick down "$WG_IF" >/dev/null 2>&1 || true
-
-  systemctl disable --now teejay-watchdog.timer >/dev/null 2>&1 || true
-  rm -f "$SYSTEMD_SERVICE" "$SYSTEMD_TIMER" "$CRON_FILE" "$WATCH_SCRIPT" >/dev/null 2>&1 || true
-  systemctl daemon-reload >/dev/null 2>&1 || true
-
-  rm -f "$WG_CONF" >/dev/null 2>&1 || true
-  rm -rf "$BASE_DIR" >/dev/null 2>&1 || true
-
-  echo "✅ حذف شد. (اگر خواستی خود WireGuard رو هم پاک کنی: apt remove wireguard-tools)"
-}
-
-main_menu() {
-  need_root
-  ensure_dirs
-  install_wireguard
-  gen_keys_if_missing
-
-  while true; do
+setup_tunnel() {
+    local ROLE=$1
+    
     logo
-    echo "1 - setup Iran Local"
-    echo "2 - setup Kharej Local"
-    echo "3 - automation"
-    echo "4 - status (ping / wg)"
-    echo "5 - uninstall"
-    echo "6 - exit"
-    echo
-    read -r -p "انتخاب کن: " choice
-    case "$choice" in
-      1) create_iran_conf; pause ;;
-      2) create_kharej_conf; pause ;;
-      3) automation_menu; pause ;;
-      4) status_menu; pause ;;
-      5) uninstall_all; pause ;;
-      6) exit 0 ;;
-      *) echo "گزینه نامعتبر"; pause ;;
-    esac
-  done
+    echo -e "${GREEN}Running Setup for: $ROLE${NC}"
+    echo ""
+
+    # 1. Detect and Confirm Local Public IP
+    DETECTED_IP=$(get_real_ip)
+    echo -e "Detected Server IP: ${CYAN}$DETECTED_IP${NC}"
+    read -p "Is this your server IP? (Y/N): " confirm_ip
+    
+    if [[ "$confirm_ip" =~ ^[Yy]$ ]]; then
+        LOCAL_PUBLIC_IP=$DETECTED_IP
+    else
+        read -p "Enter server IP manually: " LOCAL_PUBLIC_IP
+    fi
+
+    echo ""
+    
+    # 2. Get Remote Public IP
+    read -p "Enter Remote (Kharej/Iran) Public IP: " REMOTE_PUBLIC_IP
+
+    # 3. MTU Settings
+    read -p "Enter MTU (Default 1436): " USER_MTU
+    MTU=${USER_MTU:-1436}
+
+    # 4. Define Local IPs based on Role
+    # Iran: 192.168.100.1 <---> Kharej: 192.168.100.2
+    if [ "$ROLE" == "IRAN" ]; then
+        LOCAL_PRIVATE_IP="192.168.100.1"
+        REMOTE_PRIVATE_IP="192.168.100.2"
+    else
+        LOCAL_PRIVATE_IP="192.168.100.2"
+        REMOTE_PRIVATE_IP="192.168.100.1"
+    fi
+
+    echo ""
+    echo -e "${YELLOW}Configuration:${NC}"
+    echo -e "Public:  $LOCAL_PUBLIC_IP <---> $REMOTE_PUBLIC_IP"
+    echo -e "Local:   $LOCAL_PRIVATE_IP <---> $REMOTE_PRIVATE_IP"
+    echo -e "MTU:     $MTU"
+    echo ""
+    read -p "Press Enter to apply..."
+
+    # Save Config
+    cat <<EOF > "$CONFIG_FILE"
+LOCAL_PUBLIC_IP="$LOCAL_PUBLIC_IP"
+REMOTE_PUBLIC_IP="$REMOTE_PUBLIC_IP"
+LOCAL_PRIVATE_IP="$LOCAL_PRIVATE_IP"
+REMOTE_PRIVATE_IP="$REMOTE_PRIVATE_IP"
+MTU="$MTU"
+EOF
+
+    # Apply Tunnel
+    apply_tunnel_commands
+    
+    # Setup Automation automatically after setup
+    setup_automation_cron
+
+    echo ""
+    echo -e "${GREEN}Tunnel Setup Complete!${NC}"
+    echo -e "Try pinging ${CYAN}$REMOTE_PRIVATE_IP${NC} from Status menu."
+    read -p "Press Enter to return to menu..."
 }
 
-main_menu
+apply_tunnel_commands() {
+    # Load config if exists
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
+    else
+        echo -e "${RED}No config found!${NC}"
+        return
+    fi
+
+    # Clean existing
+    ip link set $TUNNEL_NAME down 2>/dev/null
+    ip tunnel del $TUNNEL_NAME 2>/dev/null
+
+    # Create new
+    ip tunnel add $TUNNEL_NAME mode gre local "$LOCAL_PUBLIC_IP" remote "$REMOTE_PUBLIC_IP" ttl 255
+    ip link set $TUNNEL_NAME mtu "$MTU"
+    ip addr add "$LOCAL_PRIVATE_IP/30" dev $TUNNEL_NAME
+    ip link set $TUNNEL_NAME up
+    
+    # Enable IP Forwarding just in case
+    sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
+}
+
+setup_automation_cron() {
+    echo -e "${YELLOW}Setting up Watchdog Automation...${NC}"
+
+    # Create the Watchdog Script
+    cat <<EOF > "$WATCHDOG_FILE"
+#!/bin/bash
+# Teejay Tunnel Watchdog
+source $CONFIG_FILE
+
+# Check if tunnel interface exists
+if ! ip link show $TUNNEL_NAME > /dev/null 2>&1; then
+    echo "\$(date) - Interface missing. Recreating..." >> $LOG_FILE
+    # Re-run creation logic (We embed the commands here to be standalone)
+    ip tunnel add $TUNNEL_NAME mode gre local "\$LOCAL_PUBLIC_IP" remote "\$REMOTE_PUBLIC_IP" ttl 255
+    ip link set $TUNNEL_NAME mtu "\$MTU"
+    ip addr add "\$LOCAL_PRIVATE_IP/30" dev $TUNNEL_NAME
+    ip link set $TUNNEL_NAME up
+    exit 0
+fi
+
+# Ping check
+if ! ping -c 3 -W 2 "\$REMOTE_PRIVATE_IP" > /dev/null 2>&1; then
+    echo "\$(date) - Ping failed to \$REMOTE_PRIVATE_IP. Restarting tunnel..." >> $LOG_FILE
+    
+    # Kill and Recreate
+    ip link set $TUNNEL_NAME down
+    ip tunnel del $TUNNEL_NAME
+    
+    ip tunnel add $TUNNEL_NAME mode gre local "\$LOCAL_PUBLIC_IP" remote "\$REMOTE_PUBLIC_IP" ttl 255
+    ip link set $TUNNEL_NAME mtu "\$MTU"
+    ip addr add "\$LOCAL_PRIVATE_IP/30" dev $TUNNEL_NAME
+    ip link set $TUNNEL_NAME up
+    
+    echo "\$(date) - Tunnel recreated." >> $LOG_FILE
+else
+    # Ping OK - Optional: Log only on verbose
+    # echo "\$(date) - Ping OK" >> $LOG_FILE
+    true
+fi
+EOF
+
+    chmod +x "$WATCHDOG_FILE"
+
+    # Add to Crontab if not exists
+    (crontab -l 2>/dev/null | grep -v "$WATCHDOG_FILE"; echo "* * * * * $WATCHDOG_FILE") | crontab -
+    
+    echo -e "${GREEN}Automation Active.${NC} Checks ping every 1 minute."
+}
+
+show_status() {
+    logo
+    echo -e "${YELLOW}Tunnel Status:${NC}"
+    if ip link show $TUNNEL_NAME > /dev/null 2>&1; then
+        echo -e "Interface: ${GREEN}UP${NC}"
+        ip addr show $TUNNEL_NAME | grep "inet"
+    else
+        echo -e "Interface: ${RED}DOWN${NC}"
+    fi
+    echo ""
+    
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
+        echo -e "Pinging Remote ($REMOTE_PRIVATE_IP)..."
+        ping -c 3 -W 1 "$REMOTE_PRIVATE_IP"
+    else
+        echo "No configuration found."
+    fi
+
+    echo ""
+    echo -e "${YELLOW}Recent Watchdog Logs:${NC}"
+    tail -n 5 "$LOG_FILE" 2>/dev/null || echo "No logs yet."
+    
+    echo ""
+    read -p "Press Enter to continue..."
+}
+
+uninstall() {
+    echo -e "${RED}Uninstalling Teejay Tunnel...${NC}"
+    
+    # Remove Cron
+    crontab -l 2>/dev/null | grep -v "$WATCHDOG_FILE" | crontab -
+    
+    # Remove Interface
+    ip link set $TUNNEL_NAME down 2>/dev/null
+    ip tunnel del $TUNNEL_NAME 2>/dev/null
+    
+    # Remove Files
+    rm -rf "$CONFIG_DIR"
+    rm -f "$LOG_FILE"
+    
+    echo -e "${GREEN}Uninstalled successfully.${NC}"
+    read -p "Press Enter..."
+}
+
+# --- Main Menu ---
+
+while true; do
+    logo
+    echo "1 - Setup Iran Local"
+    echo "2 - Setup Kharej Local"
+    echo "3 - Setup Automation (Force Re-apply)"
+    echo "4 - Status (Ping check & Logs)"
+    echo "5 - Uninstall"
+    echo "6 - Exit"
+    echo ""
+    read -p "Select option: " choice
+
+    case $choice in
+        1)
+            setup_tunnel "IRAN"
+            ;;
+        2)
+            setup_tunnel "KHAREJ"
+            ;;
+        3)
+            if [ -f "$CONFIG_FILE" ]; then
+                setup_automation_cron
+                read -p "Automation updated. Press Enter..."
+            else
+                echo -e "${RED}Please setup tunnel (Option 1 or 2) first.${NC}"
+                read -p "Press Enter..."
+            fi
+            ;;
+        4)
+            show_status
+            ;;
+        5)
+            uninstall
+            ;;
+        6)
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Invalid option${NC}"
+            sleep 1
+            ;;
+    esac
+done
