@@ -146,7 +146,7 @@ ask_until_valid() {
     read -r -e -p "$prompt " ans
     ans="$(trim "$ans")"
     if [[ -z "$ans" ]]; then
-      add_log "${C_YELLOW}Empty input.${C_RESET} دوباره وارد کن."
+      add_log "${C_YELLOW}Empty input.${C_RESET} Please try again."
       continue
     fi
     if "$validator" "$ans"; then
@@ -159,30 +159,8 @@ ask_until_valid() {
   done
 }
 
-ask_yes_no() {
-  # usage: ask_yes_no "question" default(y/n) => echo y|n
-  local q="$1" def="${2:-y}" ans=""
-  while true; do
-    render
-    if [[ "$def" == "y" ]]; then
-      read -r -p "$q [Y/n]: " ans
-      ans="$(trim "$ans")"
-      [[ -z "$ans" ]] && ans="y"
-    else
-      read -r -p "$q [y/N]: " ans
-      ans="$(trim "$ans")"
-      [[ -z "$ans" ]] && ans="n"
-    fi
-    case "${ans,,}" in
-      y|yes) echo "y"; return 0 ;;
-      n|no)  echo "n"; return 0 ;;
-      *) add_log "لطفاً فقط y یا n بزن." ;;
-    esac
-  done
-}
-
 ask_ports() {
-  local prompt="Forward PORT(s) (مثال: 80 | 80,2053 | 2050-2060):"
+  local prompt="Forward PORT(s) (example: 80 | 80,2053 | 2050-2060):"
   local raw=""
   while true; do
     render
@@ -191,7 +169,7 @@ ask_ports() {
     raw="${raw// /}"
 
     if [[ -z "$raw" ]]; then
-      add_log "${C_YELLOW}Empty ports.${C_RESET} دوباره وارد کن."
+      add_log "${C_YELLOW}Empty ports.${C_RESET} Please try again."
       continue
     fi
 
@@ -233,14 +211,14 @@ ask_ports() {
   done
 }
 
-# ----------------------------- Networking helpers ------------------------------
+# ----------------------------- Packages & IP detect ------------------------------
 ensure_packages() {
   add_log "Checking required packages: iproute2, socat, curl"
   render
   local missing=()
-  command -v ip >/dev/null 2>&1 || missing+=("iproute2")
+  command -v ip    >/dev/null 2>&1 || missing+=("iproute2")
   command -v socat >/dev/null 2>&1 || missing+=("socat")
-  command -v curl >/dev/null 2>&1 || missing+=("curl")
+  command -v curl  >/dev/null 2>&1 || missing+=("curl")
 
   if ((${#missing[@]}==0)); then
     add_log "All required packages are installed."
@@ -254,24 +232,26 @@ ensure_packages() {
   return 0
 }
 
-ensure_iproute_only() {
-  add_log "Checking required package: iproute2"
+ensure_local_prereqs() {
+  add_log "Checking required packages: iproute2, curl"
   render
+  local missing=()
+  command -v ip   >/dev/null 2>&1 || missing+=("iproute2")
+  command -v curl >/dev/null 2>&1 || missing+=("curl")
 
-  if command -v ip >/dev/null 2>&1; then
-    add_log "iproute2 is already installed."
+  if ((${#missing[@]}==0)); then
+    add_log "Local prerequisites are installed."
     return 0
   fi
 
-  add_log "Installing missing package: iproute2"
+  add_log "Installing: ${missing[*]}"
   render
   apt-get update -y >/dev/null 2>&1
-  apt-get install -y iproute2 >/dev/null 2>&1 && add_log "iproute2 installed successfully." || return 1
+  apt-get install -y "${missing[@]}" >/dev/null 2>&1 && add_log "Installed successfully." || return 1
   return 0
 }
 
 detect_public_ipv4() {
-  # Best-effort public IPv4 detection (multiple providers)
   local ip=""
   ip="$(curl -4 -fsS --max-time 3 https://api64.ipify.org 2>/dev/null || true)"
   valid_ipv4 "$ip" && { echo "$ip"; return 0; }
@@ -285,6 +265,70 @@ detect_public_ipv4() {
   return 1
 }
 
+ask_local_ip_smooth() {
+  # usage: ask_local_ip_smooth "IRAN" varname
+  local label="$1" __var="$2"
+  local detected=""
+
+  if ! command -v curl >/dev/null 2>&1; then
+    add_log "curl not found. Skipping auto-detect; please enter IP manually."
+    local manual=""
+    ask_until_valid "${label} public IP (manual):" valid_ipv4 manual
+    printf -v "$__var" '%s' "$manual"
+    return 0
+  fi
+
+  detected="$(detect_public_ipv4 || true)"
+
+  if valid_ipv4 "$detected"; then
+    add_log "Detected ${label} public IP: ${C_CYAN}${detected}${C_RESET}"
+
+    local choice=""
+    while true; do
+      render
+      echo "${C_BOLD}${label} IP confirmation${C_RESET}"
+      echo
+      echo "Detected public IP:"
+      echo "  ${C_CYAN}${detected}${C_RESET}"
+      echo
+      echo "Is this your IP?"
+      echo "1) Yes"
+      echo "2) No (enter manually)"
+      echo "0) Back (cancel)"
+      echo
+      read -r -p "Select: " choice
+      choice="$(trim "$choice")"
+
+      case "$choice" in
+        1)
+          printf -v "$__var" '%s' "$detected"
+          add_log "${C_GREEN}Using detected IP:${C_RESET} $detected"
+          return 0
+          ;;
+        2)
+          local manual=""
+          ask_until_valid "${label} public IP (manual):" valid_ipv4 manual
+          printf -v "$__var" '%s' "$manual"
+          return 0
+          ;;
+        0)
+          return 1
+          ;;
+        *)
+          add_log "Invalid selection."
+          ;;
+      esac
+    done
+  fi
+
+  add_log "${C_YELLOW}Could not detect public IP automatically.${C_RESET}"
+  local manual=""
+  ask_until_valid "${label} public IP (manual):" valid_ipv4 manual
+  printf -v "$__var" '%s' "$manual"
+  return 0
+}
+
+# ----------------------------- GRE helpers ------------------------------
 valid_mtu() {
   local m="$1"
   [[ "$m" =~ ^[0-9]+$ ]] || return 1
@@ -319,7 +363,6 @@ ensure_mtu_line_in_unit() {
   add_log "WARNING: 'ip link set gre${id} up' not found; appended MTU line at end: $file"
 }
 
-# ----------------------------- Systemd service builders ------------------------------
 make_gre_service() {
   local id="$1" local_ip="$2" remote_ip="$3" local_gre_ip="$4" key="$5" mtu="${6:-}"
   local unit="gre${id}.service"
@@ -399,62 +442,28 @@ apply_rpfilter_relax() {
   sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
 }
 
-# ----------------------------- Local Setup (Smooth) ------------------------------
-ask_local_ip_smooth() {
-  # usage: ask_local_ip_smooth "IRAN" varname
-  local label="$1" __var="$2"
-  local detected=""
-  detected="$(detect_public_ipv4 || true)"
-
-  if valid_ipv4 "$detected"; then
-    add_log "Detected ${label} public IP: ${C_CYAN}${detected}${C_RESET}"
-    local yn
-    yn="$(ask_yes_no "اینـه آیپی ${label} ت؟  ${C_CYAN}${detected}${C_RESET}" "y")"
-    if [[ "$yn" == "y" ]]; then
-      printf -v "$__var" '%s' "$detected"
-      add_log "${C_GREEN}Using detected IP:${C_RESET} $detected"
-      return 0
-    fi
-    add_log "OK، دستی وارد کن."
-  else
-    add_log "${C_YELLOW}Could not detect public IP automatically.${C_RESET} دستی وارد کن."
-  fi
-
-  local manual=""
-  ask_until_valid "${label} IP (manual):" valid_ipv4 manual
-  printf -v "$__var" '%s' "$manual"
-  return 0
-}
-
+# ----------------------------- Local Setup (GRE only) ------------------------------
 iran_local_setup() {
   local ID IRANIP KHAREJIP GREBASE
   local use_mtu="n" MTU_VALUE=""
 
-  add_log "${C_MAGENTA}Wizard:${C_RESET} IRAN Local Setup (فقط GRE، بدون Forwarder)"
-  ask_until_valid "GRE Number :" is_int ID
+  add_log "${C_MAGENTA}Wizard:${C_RESET} IRAN Local Setup (GRE only)"
+  ask_until_valid "GRE Number:" is_int ID
 
-  # Smooth IP confirm
-  ask_local_ip_smooth "IRAN" IRANIP
+  ensure_local_prereqs || { die_soft "Package installation failed (iproute2/curl)."; return 0; }
 
-  ask_until_valid "KHAREJ IP (remote) :" valid_ipv4 KHAREJIP
-  ask_until_valid "GRE IP RANGE base (Example: 10.80.70.0) :" valid_gre_base GREBASE
+  ask_local_ip_smooth "IRAN" IRANIP || { add_log "Cancelled."; return 0; }
+  ask_until_valid "KHAREJ IP (remote):" valid_ipv4 KHAREJIP
+  ask_until_valid "GRE IP RANGE base (example: 10.80.70.0):" valid_gre_base GREBASE
 
   while true; do
     render
-    read -r -p "set custom MTU? (y/n): " use_mtu
+    read -r -p "Set custom MTU? (y/n): " use_mtu
     use_mtu="$(trim "$use_mtu")"
     case "${use_mtu,,}" in
-      y|yes)
-        ask_until_valid "custom MTU for GRE (576-1600):" valid_mtu MTU_VALUE
-        break
-        ;;
-      n|no|"")
-        MTU_VALUE=""
-        break
-        ;;
-      *)
-        add_log "Invalid input. Please enter y or n."
-        ;;
+      y|yes) ask_until_valid "Custom MTU (576-1600):" valid_mtu MTU_VALUE; break ;;
+      n|no|"") MTU_VALUE=""; break ;;
+      *) add_log "Invalid input. Please enter y or n." ;;
     esac
   done
 
@@ -463,8 +472,6 @@ iran_local_setup() {
   local_gre_ip="$(ipv4_set_last_octet "$GREBASE" 1)"
   peer_gre_ip="$(ipv4_set_last_octet "$GREBASE" 2)"
   add_log "KEY=${key} | IRAN(GRE)=${local_gre_ip} | KHAREJ(GRE)=${peer_gre_ip}"
-
-  ensure_iproute_only || { die_soft "Package installation failed (iproute2)."; return 0; }
 
   make_gre_service "$ID" "$IRANIP" "$KHAREJIP" "$local_gre_ip" "$key" "$MTU_VALUE"
   local rc=$?
@@ -476,7 +483,6 @@ iran_local_setup() {
 
   add_log "Starting gre${ID}.service ..."
   enable_now "gre${ID}.service"
-
   apply_rpfilter_relax
 
   render
@@ -487,7 +493,7 @@ iran_local_setup() {
   echo "${C_BOLD}Status:${C_RESET}"
   show_unit_status_brief "gre${ID}.service"
   echo
-  echo "${C_DIM}Forwarder ها جدا هستن. از منوی Tunnel/Forwarder هر وقت خواستی اضافه کن.${C_RESET}"
+  echo "${C_DIM}Forwarders are separate. Use Tunnel/Forwarder menu later.${C_RESET}"
   pause_enter
 }
 
@@ -495,30 +501,23 @@ kharej_local_setup() {
   local ID KHAREJIP IRANIP GREBASE
   local use_mtu="n" MTU_VALUE=""
 
-  add_log "${C_MAGENTA}Wizard:${C_RESET} KHAREJ Local Setup (فقط GRE)"
-  ask_until_valid "GRE Number (same as IRAN side) :" is_int ID
+  add_log "${C_MAGENTA}Wizard:${C_RESET} KHAREJ Local Setup (GRE only)"
+  ask_until_valid "GRE Number (same as IRAN):" is_int ID
 
-  ask_local_ip_smooth "KHAREJ" KHAREJIP
+  ensure_local_prereqs || { die_soft "Package installation failed (iproute2/curl)."; return 0; }
 
-  ask_until_valid "IRAN IP (remote) :" valid_ipv4 IRANIP
-  ask_until_valid "GRE IP RANGE base (Example: 10.80.70.0) :" valid_gre_base GREBASE
+  ask_local_ip_smooth "KHAREJ" KHAREJIP || { add_log "Cancelled."; return 0; }
+  ask_until_valid "IRAN IP (remote):" valid_ipv4 IRANIP
+  ask_until_valid "GRE IP RANGE base (example: 10.80.70.0):" valid_gre_base GREBASE
 
   while true; do
     render
-    read -r -p "set custom MTU? (y/n): " use_mtu
+    read -r -p "Set custom MTU? (y/n): " use_mtu
     use_mtu="$(trim "$use_mtu")"
     case "${use_mtu,,}" in
-      y|yes)
-        ask_until_valid "custom MTU for GRE (576-1600):" valid_mtu MTU_VALUE
-        break
-        ;;
-      n|no|"")
-        MTU_VALUE=""
-        break
-        ;;
-      *)
-        add_log "Invalid input. Please enter y or n."
-        ;;
+      y|yes) ask_until_valid "Custom MTU (576-1600):" valid_mtu MTU_VALUE; break ;;
+      n|no|"") MTU_VALUE=""; break ;;
+      *) add_log "Invalid input. Please enter y or n." ;;
     esac
   done
 
@@ -527,8 +526,6 @@ kharej_local_setup() {
   local_gre_ip="$(ipv4_set_last_octet "$GREBASE" 2)"
   peer_gre_ip="$(ipv4_set_last_octet "$GREBASE" 1)"
   add_log "KEY=${key} | KHAREJ(GRE)=${local_gre_ip} | IRAN(GRE)=${peer_gre_ip}"
-
-  ensure_iproute_only || { die_soft "Package installation failed (iproute2)."; return 0; }
 
   make_gre_service "$ID" "$KHAREJIP" "$IRANIP" "$local_gre_ip" "$key" "$MTU_VALUE"
   local rc=$?
@@ -540,7 +537,6 @@ kharej_local_setup() {
 
   add_log "Starting gre${ID}.service ..."
   enable_now "gre${ID}.service"
-
   apply_rpfilter_relax
 
   render
@@ -717,7 +713,7 @@ tunnel_forwarder_add_ports() {
   pause_enter
 }
 
-# ----------------------------- Services Management (kept) ------------------------------
+# ----------------------------- Services Management ------------------------------
 service_action_menu() {
   local unit="$1"
   local action=""
@@ -822,7 +818,7 @@ services_management() {
   done
 }
 
-# ----------------------------- Uninstall (kept, minimal) ------------------------------
+# ----------------------------- Uninstall & Clean ------------------------------
 automation_backup_dir() { echo "/root/gre-backup"; }
 automation_script_path() { local id="$1"; echo "/usr/local/bin/sepehr-recreate-gre${id}.sh"; }
 automation_log_path() { local id="$1"; echo "/var/log/sepehr-gre${id}.log"; }
@@ -885,12 +881,6 @@ uninstall_clean() {
     echo "${C_BOLD}Uninstall & Clean${C_RESET}"
     echo
     echo "Target: ${C_RED}GRE${id}${C_RESET}"
-    echo "This will remove:"
-    echo "  - /etc/systemd/system/gre${id}.service"
-    echo "  - /etc/systemd/system/fw-gre${id}-*.service"
-    echo "  - cron + /usr/local/bin/sepehr-recreate-gre${id}.sh (if exists)"
-    echo "  - /var/log/sepehr-gre${id}.log (if exists)"
-    echo "  - /root/gre-backup/* (if exists)"
     echo
     echo "Type: YES (confirm)  or  NO (cancel)"
     echo
@@ -946,7 +936,7 @@ uninstall_clean() {
   pause_enter
 }
 
-# ----------------------------- MTU change (kept) ------------------------------
+# ----------------------------- MTU change ------------------------------
 change_mtu() {
   local id mtu
 
@@ -996,15 +986,15 @@ change_mtu() {
   pause_enter
 }
 
-# ----------------------------- Main Menu (Smooth separation) ------------------------------
+# ----------------------------- Menus (smooth separation) ------------------------------
 local_setup_menu() {
   local choice=""
   while true; do
     render
-    echo "${C_BOLD}Local Setup (فقط GRE)${C_RESET}"
+    echo "${C_BOLD}Local Setup (GRE only)${C_RESET}"
     echo
-    echo "1) Setup IRAN local (GRE only)"
-    echo "2) Setup KHAREJ local (GRE only)"
+    echo "1) Setup IRAN local"
+    echo "2) Setup KHAREJ local"
     echo "0) Back"
     echo
     read -r -e -p "Select option: " choice
@@ -1023,7 +1013,7 @@ tunnel_menu() {
   local choice=""
   while true; do
     render
-    echo "${C_BOLD}Tunnel / Forwarder (جدا از Local)${C_RESET}"
+    echo "${C_BOLD}Tunnel / Forwarder (separate)${C_RESET}"
     echo
     echo "1) Add/Install Forwarder ports for an existing GRE"
     echo "0) Back"
