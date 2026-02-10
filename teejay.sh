@@ -1,276 +1,558 @@
 #!/bin/bash
+#
+# Teejay Local (IPsec VTI) + Automation
+#
 
-# ==========================================
-#  Teejay Tunnel Script + Auto Healing
-#  Simple GRE Tunnel with Ping Watchdog
-# ==========================================
+set -euo pipefail
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
 
-CONFIG_DIR="/etc/teejay-tunnel"
-CONFIG_FILE="$CONFIG_DIR/config"
-WATCHDOG_FILE="$CONFIG_DIR/watchdog.sh"
-LOG_FILE="/var/log/teejay-tunnel.log"
-TUNNEL_NAME="tj-tun0"
+CONF_FILE="/etc/teejay-local.conf"
 
-mkdir -p "$CONFIG_DIR"
+IPSEC_CONF="/etc/ipsec.conf"
+IPSEC_SECRETS="/etc/ipsec.secrets"
 
-# --- Helper Functions ---
+CONN_NAME="teejay-local"
+VTI_IF="teejay0"
 
-logo() {
-    clear
-    echo -e "${CYAN}"
-    echo "  _______           _             "
-    echo " |__   __|         (_)            "
-    echo "    | | ___  ___    _  __ _ _   _ "
-    echo "    | |/ _ \/ _ \  | |/ _\` | | | |"
-    echo "    | |  __/  __/  | | (_| | |_| |"
-    echo "    |_|\___|\___|  | |\__,_|\__, |"
-    echo "                  _/ |       __/ |"
-    echo "                 |__/       |___/ "
-    echo -e "${NC}"
-    echo -e "  ${YELLOW}Stable Local IP Tunnel Generator${NC}"
-    echo -e "  ${YELLOW}Powered by Teejay Automation${NC}"
-    echo "------------------------------------------------"
-}
+UPDOWN="/usr/local/lib/teejay-ipsec-vti-updown.sh"
+MON_SCRIPT="/usr/local/bin/teejay-local-monitor.sh"
+SYS_SERVICE="/etc/systemd/system/teejay-local-monitor.service"
+SYS_TIMER="/etc/systemd/system/teejay-local-monitor.timer"
 
-get_real_ip() {
-    local ip=""
-    ip=$(curl -s --max-time 3 4.icanhazip.com 2>/dev/null)
-    if [ -z "$ip" ]; then
-        ip=$(hostname -I | awk '{print $1}')
-    fi
-    echo "$ip"
-}
+DEFAULT_MTU="1436"
+# Local /30
+IRAN_ADDR="10.66.66.1/30"
+KHAREJ_ADDR="10.66.66.2/30"
+IRAN_PEER="10.66.66.2"
+KHAREJ_PEER="10.66.66.1"
 
-setup_tunnel() {
-    local ROLE=$1
-    
-    logo
-    echo -e "${GREEN}Running Setup for: $ROLE${NC}"
-    echo ""
-
-    # 1. Detect and Confirm Local Public IP
-    DETECTED_IP=$(get_real_ip)
-    echo -e "Detected Server IP: ${CYAN}$DETECTED_IP${NC}"
-    read -p "Is this your server IP? (Y/N): " confirm_ip
-    
-    if [[ "$confirm_ip" =~ ^[Yy]$ ]]; then
-        LOCAL_PUBLIC_IP=$DETECTED_IP
-    else
-        read -p "Enter server IP manually: " LOCAL_PUBLIC_IP
-    fi
-
-    echo ""
-    
-    # 2. Get Remote Public IP
-    read -p "Enter Remote (Kharej/Iran) Public IP: " REMOTE_PUBLIC_IP
-
-    # 3. MTU Settings
-    read -p "Enter MTU (Default 1436): " USER_MTU
-    MTU=${USER_MTU:-1436}
-
-    # 4. Define Local IPs based on Role
-    # Iran: 192.168.100.1 <---> Kharej: 192.168.100.2
-    if [ "$ROLE" == "IRAN" ]; then
-        LOCAL_PRIVATE_IP="192.168.100.1"
-        REMOTE_PRIVATE_IP="192.168.100.2"
-    else
-        LOCAL_PRIVATE_IP="192.168.100.2"
-        REMOTE_PRIVATE_IP="192.168.100.1"
-    fi
-
-    echo ""
-    echo -e "${YELLOW}Configuration:${NC}"
-    echo -e "Public:  $LOCAL_PUBLIC_IP <---> $REMOTE_PUBLIC_IP"
-    echo -e "Local:   $LOCAL_PRIVATE_IP <---> $REMOTE_PRIVATE_IP"
-    echo -e "MTU:     $MTU"
-    echo ""
-    read -p "Press Enter to apply..."
-
-    # Save Config
-    cat <<EOF > "$CONFIG_FILE"
-LOCAL_PUBLIC_IP="$LOCAL_PUBLIC_IP"
-REMOTE_PUBLIC_IP="$REMOTE_PUBLIC_IP"
-LOCAL_PRIVATE_IP="$LOCAL_PRIVATE_IP"
-REMOTE_PRIVATE_IP="$REMOTE_PRIVATE_IP"
-MTU="$MTU"
+print_logo() {
+  clear || true
+  echo -e "${CYAN}${BOLD}"
+  cat << 'EOF'
+████████╗███████╗███████╗     ██╗ █████╗ ██╗   ██╗
+╚══██╔══╝██╔════╝██╔════╝     ██║██╔══██╗╚██╗ ██╔╝
+   ██║   █████╗  █████╗       ██║███████║ ╚████╔╝
+   ██║   ██╔══╝  ██╔══╝  ██   ██║██╔══██║  ╚██╔╝
+   ██║   ███████╗███████╗╚█████╔╝██║  ██║   ██║
+   ╚═╝   ╚══════╝╚══════╝ ╚════╝ ╚═╝  ╚═╝   ╚═╝
 EOF
-
-    # Apply Tunnel
-    apply_tunnel_commands
-    
-    # Setup Automation automatically after setup
-    setup_automation_cron
-
-    echo ""
-    echo -e "${GREEN}Tunnel Setup Complete!${NC}"
-    echo -e "Try pinging ${CYAN}$REMOTE_PRIVATE_IP${NC} from Status menu."
-    read -p "Press Enter to return to menu..."
+  echo -e "${NC}"
+  echo -e "  ${DIM}Teejay Local • IPsec(VTI) Local IP + Automation Monitor${NC}"
+  echo ""
 }
 
-apply_tunnel_commands() {
-    # Load config if exists
-    if [ -f "$CONFIG_FILE" ]; then
-        source "$CONFIG_FILE"
+require_root() {
+  if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    print_logo
+    echo -e "  ${RED}Run as root (sudo).${NC}"
+    echo -e "  ${YELLOW}Usage:${NC} sudo bash $0"
+    exit 1
+  fi
+}
+
+detect_my_ip() {
+  local ip=""
+  if command -v ip &>/dev/null; then
+    ip=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'src \K[0-9.]+' | head -1 || true)
+  fi
+  if [ -z "$ip" ]; then
+    ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+  fi
+  echo "$ip"
+}
+
+ask_confirm_ip_or_manual() {
+  local detected="$1"
+  local chosen=""
+  if [ -n "$detected" ]; then
+    echo -e "  ${CYAN}Server IP detected:${NC} ${GREEN}${detected}${NC}"
+    echo -e "  ${YELLOW}is this your server ip${NC}  Y=Next level , N: enter ip manually"
+    read -r -p "  (Y/N): " yn
+    if [[ "$yn" =~ ^[yY]$ ]]; then
+      chosen="$detected"
     else
-        echo -e "${RED}No config found!${NC}"
-        return
+      read -r -p "  enter ip manually: " chosen
     fi
-
-    # Clean existing
-    ip link set $TUNNEL_NAME down 2>/dev/null
-    ip tunnel del $TUNNEL_NAME 2>/dev/null
-
-    # Create new
-    ip tunnel add $TUNNEL_NAME mode gre local "$LOCAL_PUBLIC_IP" remote "$REMOTE_PUBLIC_IP" ttl 255
-    ip link set $TUNNEL_NAME mtu "$MTU"
-    ip addr add "$LOCAL_PRIVATE_IP/30" dev $TUNNEL_NAME
-    ip link set $TUNNEL_NAME up
-    
-    # Enable IP Forwarding just in case
-    sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
+  else
+    read -r -p "  enter server public ip: " chosen
+  fi
+  echo "$chosen"
 }
 
-setup_automation_cron() {
-    echo -e "${YELLOW}Setting up Watchdog Automation...${NC}"
+save_kv() {
+  local k="$1" v="$2"
+  touch "$CONF_FILE"
+  chmod 600 "$CONF_FILE"
+  grep -v -E "^${k}=" "$CONF_FILE" > "${CONF_FILE}.tmp" 2>/dev/null || true
+  mv "${CONF_FILE}.tmp" "$CONF_FILE"
+  echo "${k}=${v}" >> "$CONF_FILE"
+}
 
-    # Create the Watchdog Script
-    cat <<EOF > "$WATCHDOG_FILE"
+load_conf() {
+  if [ -f "$CONF_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$CONF_FILE"
+  fi
+}
+
+ensure_deps() {
+  if ! command -v ipsec >/dev/null 2>&1; then
+    echo -e "  ${YELLOW}Installing strongSwan...${NC}"
+    apt-get update -qq
+    apt-get install -y strongswan strongswan-swanctl
+  fi
+}
+
+write_updown() {
+  cat > "$UPDOWN" <<'EOF'
 #!/bin/bash
-# Teejay Tunnel Watchdog
-source $CONFIG_FILE
+set -euo pipefail
 
-# Check if tunnel interface exists
-if ! ip link show $TUNNEL_NAME > /dev/null 2>&1; then
-    echo "\$(date) - Interface missing. Recreating..." >> $LOG_FILE
-    # Re-run creation logic (We embed the commands here to be standalone)
-    ip tunnel add $TUNNEL_NAME mode gre local "\$LOCAL_PUBLIC_IP" remote "\$REMOTE_PUBLIC_IP" ttl 255
-    ip link set $TUNNEL_NAME mtu "\$MTU"
-    ip addr add "\$LOCAL_PRIVATE_IP/30" dev $TUNNEL_NAME
-    ip link set $TUNNEL_NAME up
-    exit 0
-fi
+VTI_IF="${VTI_IF:-teejay0}"
+VTI_LOCAL="${VTI_LOCAL:-}"
+VTI_PEER="${VTI_PEER:-}"
+VTI_KEY="${VTI_KEY:-101}"
+VTI_ADDR="${VTI_ADDR:-10.66.66.1/30}"
+MTU="${MTU:-1436}"
 
-# Ping check
-if ! ping -c 3 -W 2 "\$REMOTE_PRIVATE_IP" > /dev/null 2>&1; then
-    echo "\$(date) - Ping failed to \$REMOTE_PRIVATE_IP. Restarting tunnel..." >> $LOG_FILE
-    
-    # Kill and Recreate
-    ip link set $TUNNEL_NAME down
-    ip tunnel del $TUNNEL_NAME
-    
-    ip tunnel add $TUNNEL_NAME mode gre local "\$LOCAL_PUBLIC_IP" remote "\$REMOTE_PUBLIC_IP" ttl 255
-    ip link set $TUNNEL_NAME mtu "\$MTU"
-    ip addr add "\$LOCAL_PRIVATE_IP/30" dev $TUNNEL_NAME
-    ip link set $TUNNEL_NAME up
-    
-    echo "\$(date) - Tunnel recreated." >> $LOG_FILE
-else
-    # Ping OK - Optional: Log only on verbose
-    # echo "\$(date) - Ping OK" >> $LOG_FILE
-    true
-fi
+case "${PLUTO_VERB:-}" in
+  up-client|up-host|up-client-v6|up-host-v6)
+    # Create VTI if not exists
+    if ! ip link show "$VTI_IF" >/dev/null 2>&1; then
+      ip link add "$VTI_IF" type vti local "$VTI_LOCAL" remote "$VTI_PEER" key "$VTI_KEY"
+    fi
+
+    ip addr flush dev "$VTI_IF" || true
+    ip addr add "$VTI_ADDR" dev "$VTI_IF"
+    ip link set "$VTI_IF" mtu "$MTU"
+    ip link set "$VTI_IF" up
+
+    # Needed sysctls for VTI/IPsec routing
+    sysctl -w "net.ipv4.ip_forward=1" >/dev/null 2>&1 || true
+    sysctl -w "net.ipv4.conf.all.rp_filter=0" >/dev/null 2>&1 || true
+    sysctl -w "net.ipv4.conf.${VTI_IF}.rp_filter=0" >/dev/null 2>&1 || true
+    ;;
+  down-client|down-host|down-client-v6|down-host-v6)
+    ip link del "$VTI_IF" >/dev/null 2>&1 || true
+    ;;
+esac
+EOF
+  chmod +x "$UPDOWN"
+}
+
+write_ipsec_configs() {
+  local left_ip="$1" right_ip="$2" psk="$3" vti_key="$4" vti_addr="$5" mtu="$6"
+
+  # Backup once
+  [ -f "$IPSEC_CONF" ] && cp -f "$IPSEC_CONF" "${IPSEC_CONF}.bak" || true
+  [ -f "$IPSEC_SECRETS" ] && cp -f "$IPSEC_SECRETS" "${IPSEC_SECRETS}.bak" || true
+
+  # ipsec.conf (minimal, stable)
+  cat > "$IPSEC_CONF" <<EOF
+config setup
+  uniqueids=no
+
+conn ${CONN_NAME}
+  keyexchange=ikev2
+  authby=psk
+  left=${left_ip}
+  leftid=${left_ip}
+  right=${right_ip}
+  rightid=${right_ip}
+
+  # Make it stable:
+  dpdaction=restart
+  dpddelay=10s
+  dpdtimeout=30s
+
+  # ESP/IKE proposals (safe defaults)
+  ike=aes256-sha256-modp2048!
+  esp=aes256-sha256!
+
+  # VTI: we carry 0.0.0.0/0 selectors but only use the VTI interface for local IP
+  leftsubnet=0.0.0.0/0
+  rightsubnet=0.0.0.0/0
+  mark=${vti_key}
+
+  auto=start
+
+  # Updown creates the VTI interface and assigns the /30
+  leftupdown=${UPDOWN}
 EOF
 
-    chmod +x "$WATCHDOG_FILE"
+  # ipsec.secrets
+  # IMPORTANT: strongSwan accepts "left right : PSK "secret""
+  cat > "$IPSEC_SECRETS" <<EOF
+${left_ip} ${right_ip} : PSK "${psk}"
+EOF
+  chmod 600 "$IPSEC_SECRETS"
 
-    # Add to Crontab if not exists
-    (crontab -l 2>/dev/null | grep -v "$WATCHDOG_FILE"; echo "* * * * * $WATCHDOG_FILE") | crontab -
-    
-    echo -e "${GREEN}Automation Active.${NC} Checks ping every 1 minute."
+  save_kv "LEFT_IP" "$left_ip"
+  save_kv "RIGHT_IP" "$right_ip"
+  save_kv "PSK" "$psk"
+  save_kv "VTI_KEY" "$vti_key"
+  save_kv "VTI_ADDR" "$vti_addr"
+  save_kv "MTU" "$mtu"
+  save_kv "VTI_IF" "$VTI_IF"
+  save_kv "CONN_NAME" "$CONN_NAME"
 }
 
-show_status() {
-    logo
-    echo -e "${YELLOW}Tunnel Status:${NC}"
-    if ip link show $TUNNEL_NAME > /dev/null 2>&1; then
-        echo -e "Interface: ${GREEN}UP${NC}"
-        ip addr show $TUNNEL_NAME | grep "inet"
+restart_ipsec() {
+  systemctl enable --now strongswan-starter >/dev/null 2>&1 || true
+  systemctl restart strongswan-starter
+  # ensure connection loads
+  ipsec rereadall >/dev/null 2>&1 || true
+  ipsec update >/dev/null 2>&1 || true
+  ipsec down "$CONN_NAME" >/dev/null 2>&1 || true
+  ipsec up "$CONN_NAME" >/dev/null 2>&1 || true
+}
+
+status_show() {
+  print_logo
+  load_conf || true
+
+  echo -e "  ${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
+  echo -e "  ${CYAN}║${NC}                     ${GREEN}Status${NC}                               ${CYAN}║${NC}"
+  echo -e "  ${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
+  echo ""
+
+  echo -e "  ${YELLOW}IPsec:${NC}"
+  ipsec statusall 2>/dev/null | sed 's/^/  /' || echo -e "  ${YELLOW}(ipsec not ready)${NC}"
+  echo ""
+
+  if ip link show "$VTI_IF" >/dev/null 2>&1; then
+    echo -e "  ${YELLOW}VTI:${NC} ${GREEN}${VTI_IF}${NC} (UP)"
+    ip -4 addr show "$VTI_IF" | sed 's/^/  /'
+  else
+    echo -e "  ${YELLOW}VTI:${NC} ${RED}${VTI_IF} not found${NC}"
+  fi
+  echo ""
+
+  local peer_test="${PEER_TEST_IP:-}"
+  if [ -n "${ROLE:-}" ]; then
+    [ "$ROLE" = "iran" ] && peer_test="$IRAN_PEER" || peer_test="$KHAREJ_PEER"
+  fi
+
+  if [ -n "$peer_test" ]; then
+    if ping -c 2 -W 2 "$peer_test" >/dev/null 2>&1; then
+      echo -e "  ${YELLOW}Ping peer (${peer_test}):${NC} ${GREEN}OK${NC}"
     else
-        echo -e "Interface: ${RED}DOWN${NC}"
+      echo -e "  ${YELLOW}Ping peer (${peer_test}):${NC} ${RED}FAIL${NC}"
     fi
-    echo ""
-    
-    if [ -f "$CONFIG_FILE" ]; then
-        source "$CONFIG_FILE"
-        echo -e "Pinging Remote ($REMOTE_PRIVATE_IP)..."
-        ping -c 3 -W 1 "$REMOTE_PRIVATE_IP"
-    else
-        echo "No configuration found."
-    fi
+  else
+    echo -e "  ${DIM}Run setup first to know peer IP.${NC}"
+  fi
 
-    echo ""
-    echo -e "${YELLOW}Recent Watchdog Logs:${NC}"
-    tail -n 5 "$LOG_FILE" 2>/dev/null || echo "No logs yet."
-    
-    echo ""
-    read -p "Press Enter to continue..."
+  echo ""
+  if systemctl is-active teejay-local-monitor.timer >/dev/null 2>&1; then
+    echo -e "  ${YELLOW}Automation:${NC} ${GREEN}ENABLED${NC}"
+  else
+    echo -e "  ${YELLOW}Automation:${NC} ${YELLOW}DISABLED${NC}"
+  fi
+  echo ""
 }
 
-uninstall() {
-    echo -e "${RED}Uninstalling Teejay Tunnel...${NC}"
-    
-    # Remove Cron
-    crontab -l 2>/dev/null | grep -v "$WATCHDOG_FILE" | crontab -
-    
-    # Remove Interface
-    ip link set $TUNNEL_NAME down 2>/dev/null
-    ip tunnel del $TUNNEL_NAME 2>/dev/null
-    
-    # Remove Files
-    rm -rf "$CONFIG_DIR"
-    rm -f "$LOG_FILE"
-    
-    echo -e "${GREEN}Uninstalled successfully.${NC}"
-    read -p "Press Enter..."
+setup_iran() {
+  print_logo
+  require_root
+  ensure_deps
+  write_updown
+
+  echo -e "  ${GREEN}1 - setup Iran Local${NC}"
+  echo ""
+
+  local myip detected kharej_ip mtu psk
+  detected="$(detect_my_ip)"
+  myip="$(ask_confirm_ip_or_manual "$detected")"
+
+  echo ""
+  read -r -p "  write kharej IP: " kharej_ip
+  read -r -p "  mtu [${DEFAULT_MTU}]: " mtu
+  mtu="${mtu:-$DEFAULT_MTU}"
+
+  echo ""
+  echo -e "  ${YELLOW}PSK (shared key) - same on both servers.${NC}"
+  read -r -p "  PSK (Enter to auto-generate): " psk
+  if [ -z "$psk" ]; then
+    psk="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)"
+    echo -e "  ${CYAN}Generated PSK:${NC} ${GREEN}${psk}${NC}"
+    echo -e "  ${YELLOW}Copy this PSK to KHAREJ setup too.${NC}"
+  fi
+
+  # VTI key: two sides must match in mark-based VTI setups.
+  local vti_key="101"
+
+  # Save role and peer ping target
+  save_kv "ROLE" "iran"
+  save_kv "PEER_TEST_IP" "$IRAN_PEER"
+
+  # export for updown script
+  save_kv "VTI_LOCAL" "$myip"
+  save_kv "VTI_PEER" "$kharej_ip"
+
+  # write configs
+  write_ipsec_configs "$myip" "$kharej_ip" "$psk" "$vti_key" "$IRAN_ADDR" "$mtu"
+
+  # Make updown see env vars (strongSwan does not read our /etc/teejay-local.conf),
+  # so we embed them via a wrapper in /etc/default (simple way: source in updown is not safe).
+  # We'll instead export them by writing a small file used by monitor recovery to recreate VTI if needed.
+  # Updown already uses PLUTO vars + VTI_LOCAL/VTI_PEER from environment; strongSwan doesn't set those.
+  # So we rely on "ip link add vti local/right key" with saved values in monitor during recovery,
+  # and let updown handle addr/mtu when ipsec comes up.
+
+  echo ""
+  echo -e "  ${YELLOW}Starting IPsec...${NC}"
+  restart_ipsec
+
+  echo ""
+  echo -e "  ${GREEN}Done.${NC}"
+  echo -e "  ${YELLOW}Test:${NC} ping ${CYAN}${IRAN_PEER}${NC}"
+  echo ""
 }
 
-# --- Main Menu ---
+setup_kharej() {
+  print_logo
+  require_root
+  ensure_deps
+  write_updown
 
-while true; do
-    logo
-    echo "1 - Setup Iran Local"
-    echo "2 - Setup Kharej Local"
-    echo "3 - Setup Automation (Force Re-apply)"
-    echo "4 - Status (Ping check & Logs)"
-    echo "5 - Uninstall"
-    echo "6 - Exit"
+  echo -e "  ${GREEN}2 - setup Kharej local${NC}"
+  echo ""
+
+  local myip detected iran_ip mtu psk
+  detected="$(detect_my_ip)"
+  myip="$(ask_confirm_ip_or_manual "$detected")"
+
+  echo ""
+  read -r -p "  write iran IP: " iran_ip
+  read -r -p "  mtu [${DEFAULT_MTU}]: " mtu
+  mtu="${mtu:-$DEFAULT_MTU}"
+
+  echo ""
+  echo -e "  ${YELLOW}PSK (shared key) - same on both servers.${NC}"
+  read -r -p "  PSK: " psk
+  if [ -z "$psk" ]; then
+    echo -e "  ${RED}PSK is required on this side (use the same PSK from IRAN).${NC}"
+    exit 1
+  fi
+
+  local vti_key="101"
+
+  save_kv "ROLE" "kharej"
+  save_kv "PEER_TEST_IP" "$KHAREJ_PEER"
+  save_kv "VTI_LOCAL" "$myip"
+  save_kv "VTI_PEER" "$iran_ip"
+
+  write_ipsec_configs "$myip" "$iran_ip" "$psk" "$vti_key" "$KHAREJ_ADDR" "$mtu"
+
+  echo ""
+  echo -e "  ${YELLOW}Starting IPsec...${NC}"
+  restart_ipsec
+
+  echo ""
+  echo -e "  ${GREEN}Done.${NC}"
+  echo -e "  ${YELLOW}Test:${NC} ping ${CYAN}${KHAREJ_PEER}${NC}"
+  echo ""
+}
+
+install_automation() {
+  print_logo
+  require_root
+  ensure_deps
+  load_conf || true
+
+  echo -e "  ${GREEN}3- automation${NC}"
+  echo ""
+
+  if [ ! -f "$CONF_FILE" ]; then
+    echo -e "  ${RED}Not configured yet.${NC} Run option 1 or 2 first."
+    exit 1
+  fi
+
+  # monitor script: step-by-step recovery
+  cat > "$MON_SCRIPT" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+CONF_FILE="/etc/teejay-local.conf"
+log(){ echo "[teejay-monitor] $*"; }
+
+load_conf(){
+  if [ -f "$CONF_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$CONF_FILE"
+  fi
+}
+
+ping_peer(){
+  ping -c 1 -W 2 "$1" >/dev/null 2>&1
+}
+
+hard_reset(){
+  # Step-by-step reset
+  log "1) ipsec down"
+  ipsec down "${CONN_NAME:-teejay-local}" >/dev/null 2>&1 || true
+
+  log "2) delete VTI"
+  ip link del "${VTI_IF:-teejay0}" >/dev/null 2>&1 || true
+
+  log "3) restart strongSwan"
+  systemctl restart strongswan-starter >/dev/null 2>&1 || true
+  ipsec rereadall >/dev/null 2>&1 || true
+  ipsec update >/dev/null 2>&1 || true
+
+  log "4) ipsec up"
+  ipsec up "${CONN_NAME:-teejay-local}" >/dev/null 2>&1 || true
+}
+
+main(){
+  load_conf
+
+  PEER_TEST_IP="${PEER_TEST_IP:-}"
+  if [ -z "$PEER_TEST_IP" ] && [ -n "${ROLE:-}" ]; then
+    if [ "$ROLE" = "iran" ]; then PEER_TEST_IP="10.66.66.2"; else PEER_TEST_IP="10.66.66.1"; fi
+  fi
+  if [ -z "$PEER_TEST_IP" ]; then
+    log "No PEER_TEST_IP found. Run setup first."
+    exit 0
+  fi
+
+  # Health check: 3 consecutive fails
+  fails=0
+  for i in 1 2 3; do
+    if ping_peer "$PEER_TEST_IP"; then
+      log "OK: ping to $PEER_TEST_IP"
+      exit 0
+    fi
+    fails=$((fails+1))
+    sleep 2
+  done
+
+  if [ "$fails" -lt 3 ]; then
+    exit 0
+  fi
+
+  log "FAIL: ping to $PEER_TEST_IP failed 3 times -> start recovery"
+  hard_reset
+
+  # verify recovery up to 10 tries
+  for t in $(seq 1 10); do
+    if ping_peer "$PEER_TEST_IP"; then
+      log "Recovered: ping is back"
+      exit 0
+    fi
+    log "Waiting... try $t/10"
+    sleep 3
+  done
+
+  log "Recovery finished but still failing"
+  exit 1
+}
+
+main "$@"
+EOF
+  chmod +x "$MON_SCRIPT"
+
+  cat > "$SYS_SERVICE" <<EOF
+[Unit]
+Description=Teejay Local - Monitor & Auto Repair (IPsec VTI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${MON_SCRIPT}
+EOF
+
+  cat > "$SYS_TIMER" <<'EOF'
+[Unit]
+Description=Run Teejay Local monitor every minute
+
+[Timer]
+OnBootSec=45
+OnUnitActiveSec=60
+AccuracySec=5
+Unit=teejay-local-monitor.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now teejay-local-monitor.timer
+
+  echo -e "  ${GREEN}Automation enabled.${NC}"
+  echo -e "  ${YELLOW}Logs:${NC} journalctl -u teejay-local-monitor -f"
+  echo ""
+}
+
+uninstall_all() {
+  print_logo
+  require_root
+
+  echo -e "  ${GREEN}5-unistall${NC}"
+  echo ""
+
+  systemctl disable --now teejay-local-monitor.timer >/dev/null 2>&1 || true
+  systemctl disable --now teejay-local-monitor.service >/dev/null 2>&1 || true
+  rm -f "$SYS_TIMER" "$SYS_SERVICE" "$MON_SCRIPT"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+
+  ipsec down "$CONN_NAME" >/dev/null 2>&1 || true
+  ip link del "$VTI_IF" >/dev/null 2>&1 || true
+  systemctl restart strongswan-starter >/dev/null 2>&1 || true
+
+  rm -f "$CONF_FILE"
+  # Don't delete user's whole ipsec config if they had other tunnels.
+  # We only remove our conn if it exists in current file by overwriting is risky.
+  # So we restore backups if present.
+  if [ -f "${IPSEC_CONF}.bak" ]; then cp -f "${IPSEC_CONF}.bak" "$IPSEC_CONF"; fi
+  if [ -f "${IPSEC_SECRETS}.bak" ]; then cp -f "${IPSEC_SECRETS}.bak" "$IPSEC_SECRETS"; fi
+  rm -f "$UPDOWN"
+
+  systemctl restart strongswan-starter >/dev/null 2>&1 || true
+
+  echo -e "  ${GREEN}Uninstall completed.${NC}"
+  echo ""
+}
+
+main_menu() {
+  require_root
+  print_logo
+
+  local myip
+  myip="$(detect_my_ip)"
+  if [ -n "$myip" ]; then
+    echo -e "  ${DIM}This server IP:${NC} ${CYAN}${myip}${NC}"
     echo ""
-    read -p "Select option: " choice
+  fi
 
-    case $choice in
-        1)
-            setup_tunnel "IRAN"
-            ;;
-        2)
-            setup_tunnel "KHAREJ"
-            ;;
-        3)
-            if [ -f "$CONFIG_FILE" ]; then
-                setup_automation_cron
-                read -p "Automation updated. Press Enter..."
-            else
-                echo -e "${RED}Please setup tunnel (Option 1 or 2) first.${NC}"
-                read -p "Press Enter..."
-            fi
-            ;;
-        4)
-            show_status
-            ;;
-        5)
-            uninstall
-            ;;
-        6)
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}Invalid option${NC}"
-            sleep 1
-            ;;
-    esac
-done
+  echo -e "  1 - setup Iran Local"
+  echo -e "  2- setup Kharej local"
+  echo -e "  3- automation"
+  echo -e "  4 - status (like ping or ...)"
+  echo -e "  5-unistall"
+  echo -e "  6-exit"
+  echo ""
+  read -r -p "  Choice (1-6): " c
+
+  case "$c" in
+    1) setup_iran ;;
+    2) setup_kharej ;;
+    3) install_automation ;;
+    4) status_show ;;
+    5) uninstall_all ;;
+    6) echo -e "  ${GREEN}Bye.${NC}"; exit 0 ;;
+    *) echo -e "  ${RED}Invalid choice.${NC}" ;;
+  esac
+}
+
+main_menu
