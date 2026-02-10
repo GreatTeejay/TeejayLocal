@@ -1,284 +1,296 @@
 #!/bin/bash
 
 # ==========================================
-#  Teejay Tunnel - NUCLEAR STABILITY EDITION
-#  Mode: Systemd Service (Real-time Watchdog)
-#  Fixed: dpkg locks, firewall drops, latency
+#  TEE JAY TUNNEL - PREMIUM EDITION v4
+#  Stable GRE Tunnel + Auto Healing Service
 # ==========================================
 
-# --- Colors ---
+# --- Colors & Styles ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+BOLD='\033[1m'
 NC='\033[0m'
 
-# --- Config Paths ---
-BASE_DIR="/etc/teejay-tunnel"
-CONFIG_FILE="$BASE_DIR/config"
-WATCHDOG_SCRIPT="$BASE_DIR/watchdog.sh"
-SERVICE_FILE="/etc/systemd/system/teejay-watchdog.service"
-LOG_FILE="/var/log/teejay-tunnel.log"
-TUNNEL_NAME="tj-tun0"
+# --- Paths ---
+DIR="/etc/teejay-tunnel"
+CONF="$DIR/config.env"
+SCRIPT="$DIR/watchdog.sh"
+SERVICE="/etc/systemd/system/teejay-watchdog.service"
+LOG="/var/log/teejay-tunnel.log"
+IFACE="tj-tun0"
 
 # --- Root Check ---
 if [[ $EUID -ne 0 ]]; then
-   echo -e "${RED}Error: Run as root! (sudo bash $0)${NC}"
-   exit 1
+    echo -e "${RED}${BOLD}CRITICAL ERROR:${NC} Please run as root!"
+    echo -e "Usage: ${YELLOW}sudo bash $0${NC}"
+    exit 1
 fi
 
-# --- Kill dpkg locks if stuck ---
-fix_locks() {
+# --- Pre-flight Checks (Fix Locks & Modules) ---
+prepare_system() {
+    # 1. Load Kernel Module for GRE
+    modprobe ip_gre 2>/dev/null
+    lsmod | grep grep >/dev/null 2>&1
+
+    # 2. Fix dpkg locks
     if pgrep unattended-upgr > /dev/null; then
-        echo -e "${YELLOW}Killing background updates to release lock...${NC}"
         killall unattended-upgr 2>/dev/null
-        rm -f /var/lib/dpkg/lock-frontend 2>/dev/null
-        rm -f /var/lib/dpkg/lock 2>/dev/null
+        rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock 2>/dev/null
     fi
+    
+    # 3. Create Dir
+    mkdir -p "$DIR"
 }
 
-# --- Logo ---
-logo() {
+# --- Visuals ---
+header() {
     clear
-    echo -e "${CYAN}"
-    echo "  _______           _             "
-    echo " |__   __|         (_)            "
-    echo "    | | ___  ___    _  __ _ _   _ "
-    echo "    | |/ _ \/ _ \  | |/ _\` | | | |"
-    echo "    | |  __/  __/  | | (_| | |_| |"
-    echo "    |_|\___|\___|  | |\__,_|\__, |"
-    echo "                  _/ |       __/ |"
-    echo "                 |__/       |___/ "
+    echo -e "${CYAN}${BOLD}"
+    echo "  _______ ______ ______       _       __     __"
+    echo " |__   __|  ____|  ____|     | |   /\\ \\   / /"
+    echo "    | |  | |__  | |__        | |  /  \\ \\_/ / "
+    echo "    | |  |  __| |  __|   _   | | / /\\ \\   /  "
+    echo "    | |  | |____| |____ | |__| |/ ____ \\ |   "
+    echo "    |_|  |______|______| \____//_/    \\_\\|   "
     echo -e "${NC}"
-    echo -e "  ${YELLOW}NUCLEAR EDITION - ZERO DOWNTIME${NC}"
-    echo "------------------------------------------------"
+    echo -e "  ${YELLOW}Stable GRE Tunnel Automation${NC}"
+    echo -e "  ${BLUE}==============================================${NC}"
 }
 
-get_real_ip() {
-    curl -s --max-time 3 4.icanhazip.com || ip route get 8.8.8.8 | awk '{print $7; exit}'
+# --- IP Detection ---
+get_ip() {
+    local ip=$(curl -s --max-time 3 4.icanhazip.com)
+    if [[ -z "$ip" ]]; then
+        ip=$(ip route get 8.8.8.8 | awk '{print $7; exit}')
+    fi
+    echo "$ip"
 }
 
-# --- Main Setup Function ---
-setup_tunnel() {
-    local ROLE=$1
-    fix_locks
+# --- Setup Function ---
+setup() {
+    prepare_system
+    header
     
-    mkdir -p "$BASE_DIR"
-    
-    logo
-    echo -e "${GREEN}Setup Mode: $ROLE${NC}"
-    
-    # 1. IP Detection
-    DETECTED_IP=$(get_real_ip)
-    echo -e "Detected IP: ${CYAN}$DETECTED_IP${NC}"
-    read -p "Is this your server ip? (y/n): " confirm
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        LOCAL_PUB=$DETECTED_IP
+    # 1. Detect Role
+    echo -e "${BOLD}Select Server Location:${NC}"
+    echo -e "${CYAN}1)${NC} IRAN Server"
+    echo -e "${CYAN}2)${NC} KHAREJ Server"
+    read -p "Choose (1/2): " role_opt
+
+    if [[ "$role_opt" == "1" ]]; then
+        ROLE="IRAN"
+        MY_LOC_IP="10.10.10.1"
+        PEER_LOC_IP="10.10.10.2"
+        PEER_NAME="KHAREJ"
+    elif [[ "$role_opt" == "2" ]]; then
+        ROLE="KHAREJ"
+        MY_LOC_IP="10.10.10.2"
+        PEER_LOC_IP="10.10.10.1"
+        PEER_NAME="IRAN"
     else
-        read -p "Enter ip manually: " LOCAL_PUB
+        echo -e "${RED}Invalid Option.${NC}"
+        sleep 2
+        return
+    fi
+
+    echo ""
+    echo -e "${GREEN}>> Selected Role: ${BOLD}$ROLE${NC}"
+    
+    # 2. Public IPs
+    CURRENT_IP=$(get_ip)
+    echo -e "Detected Public IP: ${YELLOW}$CURRENT_IP${NC}"
+    read -p "Is this correct? (y/n): " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        MY_PUB_IP=$CURRENT_IP
+    else
+        read -p "Enter YOUR Public IP Manually: " MY_PUB_IP
     fi
     
     echo ""
-    read -p "Write kharej/remote IP: " REMOTE_PUB
-    read -p "MTU (Recommended 1300-1400 for stability): " USER_MTU
-    MTU=${USER_MTU:-1400}
-
-    # 2. Assign Internal IPs
-    if [ "$ROLE" == "IRAN" ]; then
-        LOC_PRIV="10.10.10.1"
-        REM_PRIV="10.10.10.2"
-    else
-        LOC_PRIV="10.10.10.2"
-        REM_PRIV="10.10.10.1"
+    echo -e "Enter ${CYAN}${PEER_NAME}${NC} Public IP:"
+    read -p "IP: " PEER_PUB_IP
+    
+    if [[ -z "$PEER_PUB_IP" ]]; then
+        echo -e "${RED}Error: Peer IP is required.${NC}"
+        exit 1
     fi
 
     # 3. Save Config
-    cat <<EOF > "$CONFIG_FILE"
-LOCAL_PUB="$LOCAL_PUB"
-REMOTE_PUB="$REMOTE_PUB"
-LOC_PRIV="$LOC_PRIV"
-REM_PRIV="$REM_PRIV"
-MTU="$MTU"
+    cat <<EOF > "$CONF"
+ROLE="$ROLE"
+MY_PUB_IP="$MY_PUB_IP"
+PEER_PUB_IP="$PEER_PUB_IP"
+MY_LOC_IP="$MY_LOC_IP"
+PEER_LOC_IP="$PEER_LOC_IP"
+PEER_NAME="$PEER_NAME"
+IFACE="$IFACE"
 EOF
 
-    echo -e "${YELLOW}Configuring Network & Firewall...${NC}"
+    # 4. Apply & Install Watchdog
+    install_watchdog
     
-    # Enable Forwarding
-    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-teejay.conf
-    sysctl -p /etc/sysctl.d/99-teejay.conf >/dev/null 2>&1
-
-    # Apply Tunnel Immediately
-    apply_tunnel_logic
-    
-    # Install Watchdog Service
-    install_service
-
+    # 5. Final Output
+    header
+    echo -e "${GREEN}${BOLD}✅ SETUP SUCCESSFUL!${NC}"
+    echo -e "${BLUE}==============================================${NC}"
+    echo -e " 🌍 YOU ARE:          ${YELLOW}${BOLD}${ROLE} SERVER${NC}"
+    echo -e " 📍 YOUR LOCAL IP:    ${CYAN}${MY_LOC_IP}${NC}"
+    echo -e " 🎯 ${PEER_NAME} LOCAL IP:  ${RED}${PEER_LOC_IP}${NC}  <-- (Use this in config)"
+    echo -e "${BLUE}==============================================${NC}"
+    echo -e "Tunnel is running. Watchdog is checking connection."
     echo ""
-    echo -e "${GREEN}DONE! Tunnel is active and protected by Watchdog Service.${NC}"
-    echo -e "Logs are at: $LOG_FILE"
-    read -p "Press Enter..."
+    read -p "Press Enter to return to menu..."
 }
 
-# --- Tunnel Application Logic (Reusable) ---
-apply_tunnel_logic() {
-    source "$CONFIG_FILE"
+# --- Installation & Watchdog Logic ---
+install_watchdog() {
+    echo -e "${YELLOW}Configuring Network & Services...${NC}"
     
-    # 1. Allow GRE Protocol (47) in Firewall
-    if command -v ufw >/dev/null; then
-        ufw allow proto gre to any >/dev/null 2>&1
-    fi
-    iptables -I INPUT -p gre -j ACCEPT 2>/dev/null
-    
-    # 2. Reset Interface
-    ip link set $TUNNEL_NAME down 2>/dev/null
-    ip tunnel del $TUNNEL_NAME 2>/dev/null
-    
-    # 3. Build Tunnel
-    ip tunnel add $TUNNEL_NAME mode gre local "$LOCAL_PUB" remote "$REMOTE_PUB" ttl 255
-    ip link set $TUNNEL_NAME mtu "$MTU"
-    ip addr add "$LOC_PRIV/30" dev $TUNNEL_NAME
-    ip link set $TUNNEL_NAME up
-}
-
-# --- Watchdog Service Installer ---
-install_service() {
-    echo -e "${YELLOW}Installing Systemd Watchdog (Checks every 10s)...${NC}"
-
-    # 1. Create the detailed watchdog script
-    cat <<EOF > "$WATCHDOG_SCRIPT"
+    # Create the Watchdog Script
+    cat <<EOF > "$SCRIPT"
 #!/bin/bash
-source $CONFIG_FILE
-LOG="$LOG_FILE"
-TUNNEL="$TUNNEL_NAME"
+source $CONF
+
+setup_tunnel() {
+    # 1. Enable IP Forwarding
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
+    
+    # 2. Firewall Rules (Allow GRE Protocol 47)
+    iptables -I INPUT -p gre -j ACCEPT 2>/dev/null
+    iptables -I OUTPUT -p gre -j ACCEPT 2>/dev/null
+    
+    # 3. Create Interface
+    ip link set \$IFACE down 2>/dev/null
+    ip tunnel del \$IFACE 2>/dev/null
+    
+    ip tunnel add \$IFACE mode gre local "\$MY_PUB_IP" remote "\$PEER_PUB_IP" ttl 255
+    ip link set \$IFACE mtu 1400
+    ip addr add "\$MY_LOC_IP/30" dev \$IFACE
+    ip link set \$IFACE up
+}
+
+# Initial Setup
+setup_tunnel
 
 while true; do
-    # Check if interface exists
-    if ! ip link show \$TUNNEL > /dev/null 2>&1; then
-        echo "\$(date) - [CRITICAL] Interface missing. Rebuilding..." >> \$LOG
-        ip tunnel add \$TUNNEL mode gre local "\$LOCAL_PUB" remote "\$REMOTE_PUB" ttl 255
-        ip link set \$TUNNEL mtu "\$MTU"
-        ip addr add "\$LOC_PRIV/30" dev \$TUNNEL
-        ip link set \$TUNNEL up
-        sleep 2
+    # Check Interface
+    if ! ip link show \$IFACE > /dev/null 2>&1; then
+        echo "\$(date) - Interface missing. Rebuilding..." >> $LOG
+        setup_tunnel
     fi
 
-    # Ping Check (3 packets, fast timeout)
-    if ! ping -c 3 -W 2 "\$REM_PRIV" > /dev/null 2>&1; then
-        echo "\$(date) - [DOWN] Connection lost. Restarting tunnel..." >> \$LOG
-        
-        # Hard Reset
-        ip link set \$TUNNEL down
-        ip tunnel del \$TUNNEL
-        
-        ip tunnel add \$TUNNEL mode gre local "\$LOCAL_PUB" remote "\$REMOTE_PUB" ttl 255
-        ip link set \$TUNNEL mtu "\$MTU"
-        ip addr add "\$LOC_PRIV/30" dev \$TUNNEL
-        ip link set \$TUNNEL up
-        
-        # Enforce Firewall again just in case
-        iptables -I INPUT -p gre -j ACCEPT 2>/dev/null
-        
-        echo "\$(date) - [RECOVERED] Tunnel rebuilt." >> \$LOG
-    else
-        # Success - Do nothing (or log verbose)
-        # echo "\$(date) - [OK] Heartbeat" >> \$LOG
-        true
+    # Check Ping (Fast check: 3 packets, 1 sec wait)
+    if ! ping -c 3 -W 1 "\$PEER_LOC_IP" > /dev/null 2>&1; then
+        echo "\$(date) - Connection lost to \$PEER_LOC_IP. Restarting..." >> $LOG
+        setup_tunnel
+        echo "\$(date) - Restarted." >> $LOG
     fi
     
-    # Wait 10 seconds before next check
+    # Check every 10 seconds
     sleep 10
 done
 EOF
-    chmod +x "$WATCHDOG_SCRIPT"
+    chmod +x "$SCRIPT"
 
-    # 2. Create Systemd Service Unit
-    cat <<SERVICE > "$SERVICE_FILE"
+    # Create Systemd Service
+    cat <<EOF > "$SERVICE"
 [Unit]
-Description=Teejay Tunnel Watchdog
+Description=TEE JAY Tunnel Watchdog
 After=network.target network-online.target
-Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$WATCHDOG_SCRIPT
+ExecStart=$SCRIPT
 Restart=always
-RestartSec=3
+RestartSec=5
 User=root
 
 [Install]
 WantedBy=multi-user.target
-SERVICE
+EOF
 
-    # 3. Enable and Start
+    # Reload & Start
     systemctl daemon-reload
-    systemctl enable teejay-watchdog
+    systemctl enable teejay-watchdog >/dev/null 2>&1
     systemctl restart teejay-watchdog
 }
 
-# --- Uninstaller ---
+# --- Uninstall ---
 uninstall() {
-    echo -e "${RED}Stopping and Removing everything...${NC}"
+    header
+    echo -e "${RED}Uninstalling...${NC}"
     systemctl stop teejay-watchdog 2>/dev/null
     systemctl disable teejay-watchdog 2>/dev/null
-    rm -f "$SERVICE_FILE"
+    rm -f "$SERVICE"
     systemctl daemon-reload
     
-    ip link set $TUNNEL_NAME down 2>/dev/null
-    ip tunnel del $TUNNEL_NAME 2>/dev/null
+    ip link set $IFACE down 2>/dev/null
+    ip tunnel del $IFACE 2>/dev/null
     
-    rm -rf "$BASE_DIR"
-    echo -e "${GREEN}Cleaned up.${NC}"
+    rm -rf "$DIR"
+    echo -e "${GREEN}Done.${NC}"
+    sleep 1
 }
 
 # --- Status ---
-show_status() {
-    logo
-    echo -e "${CYAN}--- Service Status ---${NC}"
-    systemctl status teejay-watchdog | grep "Active:"
+status() {
+    header
+    if [[ ! -f "$CONF" ]]; then
+        echo -e "${RED}Not configured yet.${NC}"
+        read -p "Press Enter..."
+        return
+    fi
+    source "$CONF"
     
-    echo -e "\n${CYAN}--- Network Status ---${NC}"
-    if ip link show $TUNNEL_NAME >/dev/null 2>&1; then
-        echo -e "Interface: ${GREEN}UP${NC}"
-        ip addr show $TUNNEL_NAME | grep "inet"
+    echo -e "${BOLD}Current Configuration:${NC}"
+    echo -e "Role: ${YELLOW}$ROLE${NC}"
+    echo -e "Tunnel Interface: ${CYAN}$IFACE${NC}"
+    
+    echo -e "\n${BOLD}Network Status:${NC}"
+    if ip link show $IFACE > /dev/null 2>&1; then
+         echo -e "Interface State: ${GREEN}UP${NC}"
     else
-        echo -e "Interface: ${RED}DOWN${NC}"
-    fi
-
-    if [ -f "$CONFIG_FILE" ]; then
-        source "$CONFIG_FILE"
-        echo -e "\n${CYAN}--- Connectivity Test ---${NC}"
-        ping -c 4 -W 1 "$REM_PRIV"
+         echo -e "Interface State: ${RED}DOWN${NC}"
     fi
     
-    echo -e "\n${CYAN}--- Last 5 Failure Logs ---${NC}"
-    tail -n 5 "$LOG_FILE" 2>/dev/null || echo "No errors logged yet."
+    echo -e "\n${BOLD}Connectivity Test:${NC}"
+    echo -e "Pinging ${PEER_NAME} Local IP ($PEER_LOC_IP)..."
+    ping -c 4 -W 1 "$PEER_LOC_IP"
     
+    echo -e "\n${BOLD}Recent Logs:${NC}"
+    tail -n 3 "$LOG" 2>/dev/null || echo "No logs yet."
+    
+    echo ""
     read -p "Press Enter..."
 }
 
-# --- Menu ---
+# --- Main Menu ---
 while true; do
-    logo
-    echo "1 - setup Iran Local"
-    echo "2 - setup Kharej local"
-    echo "3 - automation (Restarts Service)"
-    echo "4 - status"
-    echo "5 - unistall"
-    echo "6 - exit"
-    echo ""
-    read -p "Select: " opt
+    header
+    echo -e " ${CYAN}1${NC} - Setup ${BOLD}IRAN${NC} Local"
+    echo -e " ${CYAN}2${NC} - Setup ${BOLD}KHAREJ${NC} Local"
+    echo -e " ${CYAN}3${NC} - Automation & Watchdog Status"
+    echo -e " ${CYAN}4${NC} - Status (Ping Test)"
+    echo -e " ${CYAN}5${NC} - Uninstall"
+    echo -e " ${CYAN}6${NC} - Exit"
+    echo -e "${BLUE}==============================================${NC}"
+    read -p " Select Option: " opt
+    
     case $opt in
-        1) setup_tunnel "IRAN" ;;
-        2) setup_tunnel "KHAREJ" ;;
+        1) setup ;; # Role logic handled inside setup
+        2) setup ;; 
         3) 
-           echo "Restarting Watchdog Service..."
+           echo -e "${YELLOW}Restarting Automation Service...${NC}"
            systemctl restart teejay-watchdog
-           echo "Done."
+           echo -e "${GREEN}Done.${NC}"
            sleep 1
            ;;
-        4) show_status ;;
+        4) status ;;
         5) uninstall ;;
         6) exit 0 ;;
-        *) echo "Invalid" ;;
+        *) echo "Invalid option" ;;
     esac
 done
