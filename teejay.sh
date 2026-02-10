@@ -1,66 +1,73 @@
 #!/bin/bash
 
 # ==========================================
-#  TEE JAY TUNNEL - PREMIUM EDITION v4
-#  Stable GRE Tunnel + Auto Healing Service
+#  TEE JAY TUNNEL - MASTERPIECE EDITION
+#  High Stability + Professional UI
 # ==========================================
 
-# --- Colors & Styles ---
+# --- Colors ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+WHITE='\033[1;37m'
+NC='\033[0m' # No Color
 
-# --- Paths ---
+# --- Config ---
 DIR="/etc/teejay-tunnel"
 CONF="$DIR/config.env"
-SCRIPT="$DIR/watchdog.sh"
-SERVICE="/etc/systemd/system/teejay-watchdog.service"
-LOG="/var/log/teejay-tunnel.log"
+WATCHDOG="$DIR/watchdog.sh"
+SERVICE="/etc/systemd/system/teejay-service.service"
+LOG="/var/log/teejay.log"
 IFACE="tj-tun0"
 
 # --- Root Check ---
 if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}${BOLD}CRITICAL ERROR:${NC} Please run as root!"
-    echo -e "Usage: ${YELLOW}sudo bash $0${NC}"
+    echo -e "${RED}❌ Please run as root!${NC}"
     exit 1
 fi
 
-# --- Pre-flight Checks (Fix Locks & Modules) ---
-prepare_system() {
-    # 1. Load Kernel Module for GRE
-    modprobe ip_gre 2>/dev/null
-    lsmod | grep grep >/dev/null 2>&1
+# --- Helper: Draw Lines ---
+line() {
+    echo -e "${PURPLE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
 
-    # 2. Fix dpkg locks
+box_top() {
+    echo -e "${PURPLE}╔════════════════════════════════════════════════════════════╗${NC}"
+}
+
+box_bot() {
+    echo -e "${PURPLE}╚════════════════════════════════════════════════════════════╝${NC}"
+}
+
+# --- System Prep ---
+prepare_sys() {
+    mkdir -p "$DIR"
+    modprobe ip_gre 2>/dev/null
     if pgrep unattended-upgr > /dev/null; then
         killall unattended-upgr 2>/dev/null
-        rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock 2>/dev/null
+        rm -f /var/lib/dpkg/lock* 2>/dev/null
     fi
-    
-    # 3. Create Dir
-    mkdir -p "$DIR"
 }
 
 # --- Visuals ---
-header() {
+logo() {
     clear
-    echo -e "${CYAN}${BOLD}"
-    echo "  _______ ______ ______       _       __     __"
-    echo " |__   __|  ____|  ____|     | |   /\\ \\   / /"
-    echo "    | |  | |__  | |__        | |  /  \\ \\_/ / "
-    echo "    | |  |  __| |  __|   _   | | / /\\ \\   /  "
-    echo "    | |  | |____| |____ | |__| |/ ____ \\ |   "
-    echo "    |_|  |______|______| \____//_/    \\_\\|   "
+    echo -e "${CYAN}"
+    echo "████████╗███████╗███████╗     ██╗ █████╗ ██╗   ██╗"
+    echo "╚══██╔══╝██╔════╝██╔════╝     ██║██╔══██╗╚██╗ ██╔╝"
+    echo "   ██║   █████╗  █████╗       ██║███████║ ╚████╔╝ "
+    echo "   ██║   ██╔══╝  ██╔══╝  ██   ██║██╔══██║  ╚██╔╝  "
+    echo "   ██║   ███████╗███████╗╚█████╔╝██║  ██║   ██║   "
+    echo "   ╚═╝   ╚══════╝╚══════╝ ╚════╝ ╚═╝  ╚═╝   ╚═╝   "
     echo -e "${NC}"
-    echo -e "  ${YELLOW}Stable GRE Tunnel Automation${NC}"
-    echo -e "  ${BLUE}==============================================${NC}"
+    echo -e "      ${YELLOW}⚡ STABLE TUNNEL AUTOMATION SYSTEM ⚡${NC}"
+    line
 }
 
-# --- IP Detection ---
+# --- Get IP ---
 get_ip() {
     local ip=$(curl -s --max-time 3 4.icanhazip.com)
     if [[ -z "$ip" ]]; then
@@ -69,228 +76,214 @@ get_ip() {
     echo "$ip"
 }
 
-# --- Setup Function ---
-setup() {
-    prepare_system
-    header
-    
-    # 1. Detect Role
-    echo -e "${BOLD}Select Server Location:${NC}"
-    echo -e "${CYAN}1)${NC} IRAN Server"
-    echo -e "${CYAN}2)${NC} KHAREJ Server"
-    read -p "Choose (1/2): " role_opt
+# --- Setup Logic ---
+setup_tunnel() {
+    local ROLE_INPUT=$1
+    prepare_sys
+    logo
 
-    if [[ "$role_opt" == "1" ]]; then
+    # 1. Mode Selection
+    if [[ "$ROLE_INPUT" == "IRAN" ]]; then
         ROLE="IRAN"
-        MY_LOC_IP="10.10.10.1"
-        PEER_LOC_IP="10.10.10.2"
+        MY_LOC="10.10.10.1"
+        PEER_LOC="10.10.10.2"
         PEER_NAME="KHAREJ"
-    elif [[ "$role_opt" == "2" ]]; then
-        ROLE="KHAREJ"
-        MY_LOC_IP="10.10.10.2"
-        PEER_LOC_IP="10.10.10.1"
-        PEER_NAME="IRAN"
+        ICON="🇮🇷"
     else
-        echo -e "${RED}Invalid Option.${NC}"
-        sleep 2
-        return
+        ROLE="KHAREJ"
+        MY_LOC="10.10.10.2"
+        PEER_LOC="10.10.10.1"
+        PEER_NAME="IRAN"
+        ICON="🌍"
     fi
 
-    echo ""
-    echo -e "${GREEN}>> Selected Role: ${BOLD}$ROLE${NC}"
+    echo -e "${WHITE}  SELECTED MODE: ${GREEN}${ICON} $ROLE SERVER${NC}"
+    echo -e "${PURPLE}──────────────────────────────────────────────────────────────${NC}"
     
-    # 2. Public IPs
+    # 2. IP Config
     CURRENT_IP=$(get_ip)
-    echo -e "Detected Public IP: ${YELLOW}$CURRENT_IP${NC}"
-    read -p "Is this correct? (y/n): " confirm
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        MY_PUB_IP=$CURRENT_IP
+    echo -e "  ${CYAN}[1]${NC} Detected IP: ${WHITE}$CURRENT_IP${NC}"
+    read -p "      Is this correct? (y/n): " confirm_ip
+    if [[ "$confirm_ip" =~ ^[Yy]$ ]]; then
+        MY_PUB=$CURRENT_IP
     else
-        read -p "Enter YOUR Public IP Manually: " MY_PUB_IP
+        read -p "      Enter Manual IP: " MY_PUB
     fi
-    
     echo ""
-    echo -e "Enter ${CYAN}${PEER_NAME}${NC} Public IP:"
-    read -p "IP: " PEER_PUB_IP
     
-    if [[ -z "$PEER_PUB_IP" ]]; then
-        echo -e "${RED}Error: Peer IP is required.${NC}"
-        exit 1
-    fi
+    echo -e "  ${CYAN}[2]${NC} Enter ${YELLOW}${PEER_NAME}${NC} Public IP:"
+    read -p "      IP Address: " PEER_PUB
+    echo ""
+
+    echo -e "  ${CYAN}[3]${NC} Enter MTU (Default 1300):"
+    read -p "      Value: " USER_MTU
+    MTU=${USER_MTU:-1300}
 
     # 3. Save Config
     cat <<EOF > "$CONF"
 ROLE="$ROLE"
-MY_PUB_IP="$MY_PUB_IP"
-PEER_PUB_IP="$PEER_PUB_IP"
-MY_LOC_IP="$MY_LOC_IP"
-PEER_LOC_IP="$PEER_LOC_IP"
-PEER_NAME="$PEER_NAME"
+MY_PUB="$MY_PUB"
+PEER_PUB="$PEER_PUB"
+MY_LOC="$MY_LOC"
+PEER_LOC="$PEER_LOC"
+MTU="$MTU"
 IFACE="$IFACE"
 EOF
 
-    # 4. Apply & Install Watchdog
-    install_watchdog
-    
-    # 5. Final Output
-    header
-    echo -e "${GREEN}${BOLD}✅ SETUP SUCCESSFUL!${NC}"
-    echo -e "${BLUE}==============================================${NC}"
-    echo -e " 🌍 YOU ARE:          ${YELLOW}${BOLD}${ROLE} SERVER${NC}"
-    echo -e " 📍 YOUR LOCAL IP:    ${CYAN}${MY_LOC_IP}${NC}"
-    echo -e " 🎯 ${PEER_NAME} LOCAL IP:  ${RED}${PEER_LOC_IP}${NC}  <-- (Use this in config)"
-    echo -e "${BLUE}==============================================${NC}"
-    echo -e "Tunnel is running. Watchdog is checking connection."
+    # 4. Install Service
+    install_service
+
+    # 5. Final Output Table
+    logo
+    echo -e "${GREEN}  ✅ CONFIGURATION SUCCESSFUL!${NC}"
     echo ""
-    read -p "Press Enter to return to menu..."
+    box_top
+    echo -e "${PURPLE}║${NC}  ${WHITE}ROLE          ${NC}│  ${YELLOW}${ROLE} SERVER${NC} ${ICON}                   ${PURPLE}║${NC}"
+    echo -e "${PURPLE}║${NC}  ${WHITE}PUBLIC IP     ${NC}│  ${CYAN}${MY_PUB}${NC}               ${PURPLE}║${NC}"
+    echo -e "${PURPLE}║${NC}  ${WHITE}LOCAL IP      ${NC}│  ${GREEN}${MY_LOC}${NC}                 ${PURPLE}║${NC}"
+    echo -e "${PURPLE}║${NC}  ${WHITE}PEER LOCAL IP ${NC}│  ${RED}${PEER_LOC}${NC} (Target)          ${PURPLE}║${NC}"
+    box_bot
+    echo ""
+    echo -e "  ${CYAN}➜ Watchdog Service:${NC} ${GREEN}ACTIVE${NC} (Checks ping every 5s)"
+    echo ""
+    read -p "  Press Enter to return..."
 }
 
-# --- Installation & Watchdog Logic ---
-install_watchdog() {
-    echo -e "${YELLOW}Configuring Network & Services...${NC}"
+# --- Service Installer ---
+install_service() {
+    echo -e "${PURPLE}──────────────────────────────────────────────────────────────${NC}"
+    echo -e "  ⚙️  Installing Automation Service..."
     
-    # Create the Watchdog Script
-    cat <<EOF > "$SCRIPT"
+    cat <<EOF > "$WATCHDOG"
 #!/bin/bash
 source $CONF
 
-setup_tunnel() {
-    # 1. Enable IP Forwarding
+build_tunnel() {
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
+    sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1
+    sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1
+    sysctl -w net.ipv4.conf.\$IFACE.rp_filter=0 >/dev/null 2>&1
     
-    # 2. Firewall Rules (Allow GRE Protocol 47)
-    iptables -I INPUT -p gre -j ACCEPT 2>/dev/null
-    iptables -I OUTPUT -p gre -j ACCEPT 2>/dev/null
-    
-    # 3. Create Interface
     ip link set \$IFACE down 2>/dev/null
     ip tunnel del \$IFACE 2>/dev/null
     
-    ip tunnel add \$IFACE mode gre local "\$MY_PUB_IP" remote "\$PEER_PUB_IP" ttl 255
-    ip link set \$IFACE mtu 1400
-    ip addr add "\$MY_LOC_IP/30" dev \$IFACE
+    ip tunnel add \$IFACE mode gre local "\$MY_PUB" remote "\$PEER_PUB" ttl 255
+    ip link set \$IFACE mtu \$MTU
+    ip addr add "\$MY_LOC/30" dev \$IFACE
     ip link set \$IFACE up
+    
+    iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o \$IFACE -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null
 }
 
-# Initial Setup
-setup_tunnel
-
 while true; do
-    # Check Interface
     if ! ip link show \$IFACE > /dev/null 2>&1; then
         echo "\$(date) - Interface missing. Rebuilding..." >> $LOG
-        setup_tunnel
+        build_tunnel
     fi
 
-    # Check Ping (Fast check: 3 packets, 1 sec wait)
-    if ! ping -c 3 -W 1 "\$PEER_LOC_IP" > /dev/null 2>&1; then
-        echo "\$(date) - Connection lost to \$PEER_LOC_IP. Restarting..." >> $LOG
-        setup_tunnel
-        echo "\$(date) - Restarted." >> $LOG
+    if ! ping -c 3 -W 2 "\$PEER_LOC" > /dev/null 2>&1; then
+        echo "\$(date) - Connection lost. Rebuilding..." >> $LOG
+        build_tunnel
     fi
-    
-    # Check every 10 seconds
-    sleep 10
+    sleep 5
 done
 EOF
-    chmod +x "$SCRIPT"
+    chmod +x "$WATCHDOG"
 
-    # Create Systemd Service
     cat <<EOF > "$SERVICE"
 [Unit]
-Description=TEE JAY Tunnel Watchdog
+Description=TEE JAY Tunnel Service
 After=network.target network-online.target
 
 [Service]
 Type=simple
-ExecStart=$SCRIPT
+ExecStart=$WATCHDOG
 Restart=always
-RestartSec=5
+RestartSec=3
 User=root
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    # Reload & Start
     systemctl daemon-reload
-    systemctl enable teejay-watchdog >/dev/null 2>&1
-    systemctl restart teejay-watchdog
+    systemctl enable teejay-service >/dev/null 2>&1
+    systemctl restart teejay-service
 }
 
 # --- Uninstall ---
 uninstall() {
-    header
-    echo -e "${RED}Uninstalling...${NC}"
-    systemctl stop teejay-watchdog 2>/dev/null
-    systemctl disable teejay-watchdog 2>/dev/null
+    echo -e "${RED}  Uninstalling Service...${NC}"
+    systemctl stop teejay-service 2>/dev/null
+    systemctl disable teejay-service 2>/dev/null
     rm -f "$SERVICE"
     systemctl daemon-reload
-    
     ip link set $IFACE down 2>/dev/null
     ip tunnel del $IFACE 2>/dev/null
-    
     rm -rf "$DIR"
-    echo -e "${GREEN}Done.${NC}"
+    echo -e "${GREEN}  System Cleaned.${NC}"
     sleep 1
 }
 
 # --- Status ---
-status() {
-    header
+show_status() {
+    logo
     if [[ ! -f "$CONF" ]]; then
-        echo -e "${RED}Not configured yet.${NC}"
-        read -p "Press Enter..."
+        echo -e "${RED}  ⚠️  Not Configured Yet.${NC}"
+        read -p "  Press Enter..."
         return
     fi
     source "$CONF"
     
-    echo -e "${BOLD}Current Configuration:${NC}"
-    echo -e "Role: ${YELLOW}$ROLE${NC}"
-    echo -e "Tunnel Interface: ${CYAN}$IFACE${NC}"
+    echo -e "${WHITE}  STATUS REPORT:${NC}"
+    box_top
     
-    echo -e "\n${BOLD}Network Status:${NC}"
-    if ip link show $IFACE > /dev/null 2>&1; then
-         echo -e "Interface State: ${GREEN}UP${NC}"
+    if ip link show $IFACE >/dev/null 2>&1; then
+        echo -e "${PURPLE}║${NC}  INTERFACE     │  ${GREEN}● UP${NC}                       ${PURPLE}║${NC}"
     else
-         echo -e "Interface State: ${RED}DOWN${NC}"
+        echo -e "${PURPLE}║${NC}  INTERFACE     │  ${RED}● DOWN${NC}                     ${PURPLE}║${NC}"
     fi
     
-    echo -e "\n${BOLD}Connectivity Test:${NC}"
-    echo -e "Pinging ${PEER_NAME} Local IP ($PEER_LOC_IP)..."
-    ping -c 4 -W 1 "$PEER_LOC_IP"
+    if systemctl is-active --quiet teejay-service; then
+        echo -e "${PURPLE}║${NC}  WATCHDOG      │  ${GREEN}● RUNNING${NC}                  ${PURPLE}║${NC}"
+    else
+        echo -e "${PURPLE}║${NC}  WATCHDOG      │  ${RED}● STOPPED${NC}                  ${PURPLE}║${NC}"
+    fi
     
-    echo -e "\n${BOLD}Recent Logs:${NC}"
-    tail -n 3 "$LOG" 2>/dev/null || echo "No logs yet."
-    
+    box_bot
     echo ""
-    read -p "Press Enter..."
+    echo -e "  ${CYAN}Ping Test (${PEER_LOC}):${NC}"
+    ping -c 3 -W 1 "$PEER_LOC"
+    echo ""
+    read -p "  Press Enter..."
 }
 
 # --- Main Menu ---
 while true; do
-    header
-    echo -e " ${CYAN}1${NC} - Setup ${BOLD}IRAN${NC} Local"
-    echo -e " ${CYAN}2${NC} - Setup ${BOLD}KHAREJ${NC} Local"
-    echo -e " ${CYAN}3${NC} - Automation & Watchdog Status"
-    echo -e " ${CYAN}4${NC} - Status (Ping Test)"
-    echo -e " ${CYAN}5${NC} - Uninstall"
-    echo -e " ${CYAN}6${NC} - Exit"
-    echo -e "${BLUE}==============================================${NC}"
-    read -p " Select Option: " opt
+    logo
+    echo -e "${PURPLE}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${PURPLE}║${NC}  ${CYAN}1${NC} » Setup ${WHITE}IRAN${NC} Server   🇮🇷                             ${PURPLE}║${NC}"
+    echo -e "${PURPLE}║${NC}  ${CYAN}2${NC} » Setup ${WHITE}KHAREJ${NC} Server 🌍                             ${PURPLE}║${NC}"
+    echo -e "${PURPLE}║${NC}  ${CYAN}3${NC} » Service ${YELLOW}RESTART${NC} (Force Update)                      ${PURPLE}║${NC}"
+    echo -e "${PURPLE}║${NC}  ${CYAN}4${NC} » Check ${GREEN}STATUS${NC} (Ping)                                 ${PURPLE}║${NC}"
+    echo -e "${PURPLE}║${NC}  ${CYAN}5${NC} » ${RED}UNINSTALL${NC}                                            ${PURPLE}║${NC}"
+    echo -e "${PURPLE}║${NC}  ${CYAN}6${NC} » ${WHITE}EXIT${NC}                                                 ${PURPLE}║${NC}"
+    echo -e "${PURPLE}╚════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    read -p "  Select Option: " opt
     
     case $opt in
-        1) setup ;; # Role logic handled inside setup
-        2) setup ;; 
+        1) setup_tunnel "IRAN" ;;
+        2) setup_tunnel "KHAREJ" ;;
         3) 
-           echo -e "${YELLOW}Restarting Automation Service...${NC}"
-           systemctl restart teejay-watchdog
-           echo -e "${GREEN}Done.${NC}"
+           echo -e "  ${YELLOW}Restarting Service...${NC}"
+           systemctl restart teejay-service
+           echo -e "  ${GREEN}Done.${NC}"
            sleep 1
            ;;
-        4) status ;;
+        4) show_status ;;
         5) uninstall ;;
         6) exit 0 ;;
-        *) echo "Invalid option" ;;
+        *) echo "  Invalid option." ;;
     esac
 done
